@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "title": "CSS Basics",
+  "description": "Selectors, layout, and the cascade.",
+  "pointsPerCorrectAnswer": 1,
+  "questions": [
+    {
+      "question": "Which property changes the text color?",
+      "options": ["color", "font-color", "text-fill", "foreground"],
+      "correctAnswer": 0,
+      "timeLimit": 15
+    },
+    {
+      "question": "Which display value creates a one-dimensional layout?",
+      "options": ["flex", "grid", "block", "table"],
+      "correctAnswer": 0,
+      "timeLimit": 20
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "title": "JavaScript Basics",
+  "description": "Core language concepts for beginners.",
+  "pointsPerCorrectAnswer": 1,
+  "questions": [
+    {
+      "question": "Which keyword declares a block-scoped constant?",
+      "options": ["const", "var", "static", "define"],
+      "correctAnswer": 0,
+      "timeLimit": 15
+    },
+    {
+      "question": "What does Array.isArray([]) return?",
+      "options": ["true", "false", "undefined", "null"],
+      "correctAnswer": 0,
+      "timeLimit": 15
+    }
+  ]
+}

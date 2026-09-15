@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "title": "HTML Basics",
+  "description": "A short introduction to semantic HTML.",
+  "pointsPerCorrectAnswer": 1,
+  "questions": [
+    {
+      "question": "What does HTML stand for?",
+      "options": ["Hyper Text Markup Language", "High Text Machine Language", "Hyper Tool Markup Language", "Home Text Markup Language"],
+      "correctAnswer": 0,
+      "timeLimit": 20
+    },
+    {
+      "question": "Which element represents the main navigation links?",
+      "options": ["<nav>", "<menuitem>", "<links>", "<route>"],
+      "correctAnswer": 0,
+      "timeLimit": 15
+    }
+  ]
+}
