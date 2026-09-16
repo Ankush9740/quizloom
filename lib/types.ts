@@ -1,3 +1,10 @@
+export type AvatarCharacter =
+  | "custom"
+  | "cat" | "dog" | "panda" | "fox" | "frog" | "bear" | "rabbit" | "tiger"
+  | "lion" | "elephant" | "penguin" | "owl" | "wolf" | "koala" | "red-panda" | "shark" | "dinosaur"
+  | "cartoon-kid" | "hero" | "geek" | "ninja" | "pirate" | "explorer"
+  | "astronaut" | "wizard" | "knight" | "robot" | "alien" | "monster" | "dragon" | "superhero";
+
 export type AvatarConfig = {
   base: "round" | "bean" | "bot";
   skin: string;
@@ -5,6 +12,8 @@ export type AvatarConfig = {
   head: "none" | "cap" | "sprout" | "crown";
   accessory: "none" | "glasses" | "stars" | "bow";
   accent: string;
+  /** Missing on avatars saved before character presets were introduced. */
+  character?: AvatarCharacter;
 };
 
 export type QuizDraftQuestion = {
@@ -45,7 +54,7 @@ export type PlayerView = {
 };
 
 export type RoomState = {
-  room: { id: string; code: string; title: string; status: "lobby" | "question" | "results" | "finished"; currentQuestion: number; questionCount: number; questionStartedAt: string | null; questionEndsAt: string | null; answerCount: number };
+  room: { id: string; code: string; title: string; status: "lobby" | "question" | "results" | "finished" | "ended"; currentQuestion: number; questionCount: number; questionStartedAt: string | null; questionEndsAt: string | null; answerCount: number };
   players: PlayerView[];
   question?: { id: string; number: number; prompt: string; timeLimit: number; options: { id: string; text: string; position: number }[]; correctOptionId?: string };
   me?: PlayerView & { answered: boolean; lastPoints: number; selectedOptionId?: string; wasCorrect?: boolean };

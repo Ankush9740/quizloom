@@ -7,7 +7,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ code: stri
   try {
     const code = roomCodeSchema.parse((await params).code);
     const db = getAdminClient();
-    const { data, error } = await db.from("game_rooms").select("id,code,status,expires_at,quizzes(title)").eq("code", code).single();
+    const { data, error } = await db.from("game_rooms").select("id,code,status,expires_at,quizzes(title)").eq("code", code).order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (error && error.code !== "PGRST116") throw error;
     if (!data) return NextResponse.json({ error: "That room could not be found" }, { status: 404 });
     if (new Date(data.expires_at).getTime() < Date.now() || data.status === "finished") return NextResponse.json({ error: "That room has ended" }, { status: 410 });

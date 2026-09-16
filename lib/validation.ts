@@ -5,7 +5,8 @@ export const nicknameSchema = z.string().trim().min(2, "Use at least 2 character
 export const avatarSchema = z.object({
   base: z.enum(["round", "bean", "bot"]), skin: z.string().regex(/^#[0-9a-f]{6}$/i),
   eyes: z.enum(["dot", "happy", "wink"]), head: z.enum(["none", "cap", "sprout", "crown"]),
-  accessory: z.enum(["none", "glasses", "stars", "bow"]), accent: z.string().regex(/^#[0-9a-f]{6}$/i)
+  accessory: z.enum(["none", "glasses", "stars", "bow"]), accent: z.string().regex(/^#[0-9a-f]{6}$/i),
+  character: z.enum(["custom", "cat", "dog", "panda", "fox", "frog", "bear", "rabbit", "tiger", "lion", "elephant", "penguin", "owl", "wolf", "koala", "red-panda", "shark", "dinosaur", "cartoon-kid", "hero", "geek", "ninja", "pirate", "explorer", "astronaut", "wizard", "knight", "robot", "alien", "monster", "dragon", "superhero"]).optional()
 });
 export const questionSchema = z.object({
   prompt: z.string().trim().min(5).max(240), timeLimit: z.number().int().min(5).max(120),

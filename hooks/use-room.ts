@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import type { PlayerView, RoomState } from "@/lib/types";
+import { normalizePlayerView, toSafeCount } from "@/lib/runtime-normalization";
 import { getBrowserClient } from "@/lib/supabase/client";
 
 type Session = { playerId: string; playerToken: string } | null;
@@ -29,6 +30,7 @@ export function useRoom(code: string, session: Session = null) {
     setState(previous => previous?.question ? ({ ...previous, room: { ...previous.room, status: "results" }, question: { ...previous.question, correctOptionId } }) : previous);
   }, []);
 
+  useEffect(() => { setState(null); setError(""); }, [code, playerId]);
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
     const db = getBrowserClient(); const roomId = state?.room.id; if (!db || !roomId) return;
@@ -37,7 +39,7 @@ export function useRoom(code: string, session: Session = null) {
         const next = payload.new as { status?: RoomState["room"]["status"]; current_question?: number; answer_count?: number };
         if (next.status === "results") { if (playerId) void applyReveal(); return; }
         if (next.status === "question" && next.current_question === state?.room.currentQuestion && state.room.status === "question") {
-          setState(previous => previous ? ({ ...previous, room: { ...previous.room, answerCount: Number(next.answer_count ?? previous.room.answerCount) } }) : previous);
+          setState(previous => previous ? ({ ...previous, room: { ...previous.room, answerCount: toSafeCount(next.answer_count, previous.room.answerCount) } }) : previous);
           return;
         }
         void refresh();
@@ -45,7 +47,7 @@ export function useRoom(code: string, session: Session = null) {
       .on("postgres_changes", { event: "*", schema: "public", table: "players", filter: `room_id=eq.${roomId}` }, payload => {
         const row = (payload.eventType === "DELETE" ? payload.old : payload.new) as Record<string, unknown>; const id = String(row.id ?? ""); if (!id) return;
         if (payload.eventType === "DELETE") { setState(previous => previous ? ({ ...previous, players: previous.players.filter(player => player.id !== id) }) : previous); return; }
-        setState(previous => { if (!previous) return previous; const existing = previous.players.find(player => player.id === id); const mapped: PlayerView = { id, nickname: String(row.nickname ?? existing?.nickname ?? "Player"), avatar: (row.avatar_config ?? existing?.avatar) as PlayerView["avatar"], score: Number(row.score ?? existing?.score ?? 0), correctAnswers: Number(row.correct_answers ?? existing?.correctAnswers ?? 0), streak: Number(row.streak ?? existing?.streak ?? 0) }; return { ...previous, players: [...previous.players.filter(player => player.id !== id), mapped].sort((a,b) => b.score - a.score) }; });
+        setState(previous => { if (!previous) return previous; const existing = previous.players.find(player => player.id === id); const mapped: PlayerView = normalizePlayerView({ ...row, id }, existing); return { ...previous, players: [...previous.players.filter(player => player.id !== id), mapped].sort((a,b) => b.score - a.score) }; });
       })
       .subscribe(status => setConnected(status === "SUBSCRIBED"));
     return () => { void db.removeChannel(channel); };
