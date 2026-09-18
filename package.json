@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test:avatars": "node scripts/avatar-reliability.mjs"
+    "test:avatars": "node scripts/avatar-reliability.mjs",
+    "test:timer": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/timer-clock-regression.mjs",
+    "test:performance": "node scripts/performance-benchmark.mjs --mode=optimized --players=2,10,20 --questions=6"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",

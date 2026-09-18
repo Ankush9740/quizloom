@@ -53,9 +53,18 @@ export type PlayerView = {
   streak: number;
 };
 
+export type RoomQuestion = { id: string; number: number; prompt: string; timeLimit: number; options: { id: string; text: string; position: number }[]; correctOptionId?: string };
+
+export type RoomTransition = {
+  room: Pick<RoomState["room"], "status" | "currentQuestion" | "questionStartedAt" | "questionEndsAt" | "answerCount">;
+  question?: RoomQuestion;
+  clock?: RoomState["clock"];
+};
+
 export type RoomState = {
+  clock: { receivedAt: string; sentAt: string };
   room: { id: string; code: string; title: string; status: "lobby" | "question" | "results" | "finished" | "ended"; currentQuestion: number; questionCount: number; questionStartedAt: string | null; questionEndsAt: string | null; answerCount: number };
   players: PlayerView[];
-  question?: { id: string; number: number; prompt: string; timeLimit: number; options: { id: string; text: string; position: number }[]; correctOptionId?: string };
+  question?: RoomQuestion;
   me?: PlayerView & { answered: boolean; lastPoints: number; selectedOptionId?: string; wasCorrect?: boolean };
 };

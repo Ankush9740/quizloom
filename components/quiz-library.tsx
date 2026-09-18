@@ -72,7 +72,7 @@ export function QuizLibrary() {
     if (!token) return;
     setBusyId(quiz.id); setNotice("");
     try {
-      const response = await fetch(`/api/quizzes/${quiz.id}/rooms`, { method: "POST", headers: { "x-quiz-token": token, "Accept": "application/json" } });
+      const response = await fetch(`/api/quizzes/${quiz.id}`, { method: "POST", headers: { "x-quiz-token": token, "Accept": "application/json" } });
       const json = await readJsonResponse<RoomResponse>(response);
       sessionStorage.setItem(`quizloom:host:${json.code}`, json.hostToken);
       router.push(`/host/${json.code}`);

@@ -3,10 +3,23 @@ import { z } from "zod";
 import { getAdminClient } from "@/lib/supabase/server";
 import { apiError, assertDatabaseResult } from "@/lib/server/http";
 import { canAccessQuiz, quizDocumentFromRows } from "@/lib/server/quiz-access";
+import { createRoomForQuiz } from "@/lib/server/rooms";
 import { portableQuizSchema } from "@/lib/validation";
 import { insertQuestions } from "@/app/api/quizzes/route";
 
 const idSchema = z.string().uuid();
+
+async function finishExpiredRooms(db: ReturnType<typeof getAdminClient>, quizId: string) {
+  const now = new Date().toISOString();
+  const result = await db.from("game_rooms").update({
+    status: "finished",
+    current_question: -1,
+    question_ends_at: now,
+    updated_at: now
+  }).eq("quiz_id", quizId).in("status", ["lobby", "question", "results"]).lte("expires_at", now);
+  assertDatabaseResult(result);
+  return now;
+}
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -18,12 +31,23 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   } catch (error) { return apiError(error); }
 }
 
+export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const id = idSchema.parse((await params).id); const db = getAdminClient();
+    if (!await canAccessQuiz(db, id, request.headers.get("x-quiz-token"))) return NextResponse.json({ error: "Quiz access is not valid on this device" }, { status: 403 });
+    const result = await createRoomForQuiz(db, id);
+    if ("error" in result) return NextResponse.json({ error: result.error }, { status: 409 });
+    return NextResponse.json(result, { status: 201 });
+  } catch (error) { return apiError(error); }
+}
+
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const db = getAdminClient();
   try {
     const id = idSchema.parse((await params).id); const document = portableQuizSchema.parse(await request.json());
     if (!await canAccessQuiz(db, id, request.headers.get("x-quiz-token"))) return NextResponse.json({ error: "Quiz access is not valid on this device" }, { status: 403 });
-    const { count, error: roomError } = await db.from("game_rooms").select("id", { count: "exact", head: true }).eq("quiz_id", id).in("status", ["lobby", "question", "results"]).gt("expires_at", new Date().toISOString());
+    const now = await finishExpiredRooms(db, id);
+    const { count, error: roomError } = await db.from("game_rooms").select("id", { count: "exact", head: true }).eq("quiz_id", id).in("status", ["lobby", "question", "results"]).gt("expires_at", now);
     if (roomError) throw roomError;
     if (count) return NextResponse.json({ error: "Finish the active room before editing this quiz" }, { status: 409 });
     assertDatabaseResult(await db.from("questions").delete().eq("quiz_id", id));
@@ -38,7 +62,8 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
   try {
     const id = idSchema.parse((await params).id);
     if (!await canAccessQuiz(db, id, request.headers.get("x-quiz-token"))) return NextResponse.json({ error: "Quiz access is not valid on this device" }, { status: 403 });
-    const { count, error: roomError } = await db.from("game_rooms").select("id", { count: "exact", head: true }).eq("quiz_id", id).in("status", ["lobby", "question", "results"]).gt("expires_at", new Date().toISOString());
+    const now = await finishExpiredRooms(db, id);
+    const { count, error: roomError } = await db.from("game_rooms").select("id", { count: "exact", head: true }).eq("quiz_id", id).in("status", ["lobby", "question", "results"]).gt("expires_at", now);
     if (roomError) throw roomError;
     if (count) return NextResponse.json({ error: "Finish the active room before deleting this quiz" }, { status: 409 });
     const { data: deleted, error: deleteError } = await db.from("quizzes").delete().eq("id", id).select("id").maybeSingle();
