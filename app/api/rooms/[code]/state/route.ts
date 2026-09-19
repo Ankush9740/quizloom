@@ -21,7 +21,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     const playerId = new URL(request.url).searchParams.get("playerId");
     const hostToken = request.headers.get("x-host-token");
     const shouldLoadQuestion = room.status !== "lobby" && room.status !== "finished";
-    const shouldLoadPlayer = Boolean(playerId && shouldLoadQuestion);
+    // Keep an authenticated player's identity in the lobby response. The
+    // lightweight question transition relies on it to build player-specific
+    // answer state without another full room request.
+    const shouldLoadPlayer = Boolean(playerId);
     const [playersResult, countResult, questionResult, roomSecretResult, playerResult, playerSecretResult] = await Promise.all([
       db.from("players").select("id,nickname,avatar_config,score,correct_answers,streak,joined_at").eq("room_id", room.id).order("joined_at"),
       db.from("questions").select("id", { count: "exact", head: true }).eq("quiz_id", room.quiz_id),
@@ -67,6 +70,13 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
       players: playerViews
     };
 
+    const player = playerResult.data;
+    const secret = playerSecretResult.data;
+    const playerAuthenticated = Boolean(player && secret && safeEqualHash(request.headers.get("x-player-token"), secret.player_token_hash));
+    if (playerAuthenticated && player) {
+      response.me = { ...normalizePlayerView(player), answered: false, lastPoints: 0 };
+    }
+
     const current = questionResult.data;
     if (current) {
       const options = [...(current.question_options ?? [])].sort((a, b) => a.position - b.position);
@@ -79,9 +89,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
         ...(room.status === "results" ? { correctOptionId: options.find(option => option.is_correct)?.id } : {})
       };
 
-      const player = playerResult.data;
-      const secret = playerSecretResult.data;
-      if (player && secret && safeEqualHash(request.headers.get("x-player-token"), secret.player_token_hash)) {
+      if (playerAuthenticated && player) {
         const { data: answer, error: answerError } = await db.from("answers")
           .select("selected_option_id,points_awarded,is_correct")
           .eq("player_id", player.id).eq("question_id", current.id).maybeSingle();

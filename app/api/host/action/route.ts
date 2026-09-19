@@ -4,7 +4,7 @@ import { getAdminClient } from "@/lib/supabase/server";
 import { apiError, assertDatabaseResult } from "@/lib/server/http";
 import { safeEqualHash } from "@/lib/server/session";
 import { roomCodeSchema } from "@/lib/validation";
-import { toSafeCount } from "@/lib/runtime-normalization";
+import { normalizePlayerView, toSafeCount } from "@/lib/runtime-normalization";
 
 const schema = z.object({ code: roomCodeSchema, action: z.enum(["start", "reveal", "next", "end"]) });
 
@@ -38,7 +38,16 @@ export async function POST(request: Request) {
       if (room.status !== "question") return NextResponse.json({ error: "There is no active question" }, { status: 409 });
       const { data: reveal, error: revealError } = await db.rpc("reveal_quiz_answer", { p_room_id: room.id }).single();
       if (revealError) throw revealError;
-      return NextResponse.json({ ok: true, status: "results", correctOptionId: (reveal as { correct_option_id: string }).correct_option_id });
+      // The RPC has committed every score before it returns. Include those
+      // authoritative standings in the same host response instead of relying
+      // on a separately delivered Realtime player event.
+      const { data: playerRows, error: playersError } = await db.from("players")
+        .select("id,nickname,avatar_config,score,correct_answers,streak")
+        .eq("room_id", room.id);
+      if (playersError) throw playersError;
+      const players = (playerRows ?? []).map(player => normalizePlayerView(player))
+        .sort((a, b) => b.score - a.score || b.correctAnswers - a.correctAnswers || a.nickname.localeCompare(b.nickname) || a.id.localeCompare(b.id));
+      return NextResponse.json({ ok: true, status: "results", correctOptionId: (reveal as { correct_option_id: string }).correct_option_id, players });
     }
 
     if (body.action === "start" && room.status !== "lobby") return NextResponse.json({ error: "The quiz has already started" }, { status: 409 });

@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test:avatars": "node scripts/avatar-reliability.mjs",
     "test:timer": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/timer-clock-regression.mjs",
+    "test:multiplayer": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/multiplayer-state-regression.mjs",
+    "test:host-leaderboard": "node scripts/host-leaderboard-regression.mjs",
     "test:performance": "node scripts/performance-benchmark.mjs --mode=optimized --players=2,10,20 --questions=6"
   },
   "dependencies": {

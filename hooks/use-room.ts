@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RoomState, RoomTransition } from "@/lib/types";
+import { applyAcceptedAnswer, applyHostRevealState, applyPlayerReveal, applyQuestionTransition, type PlayerReveal } from "@/lib/room-client-state";
 import { normalizePlayerView, toSafeCount } from "@/lib/runtime-normalization";
 import { estimateServerClock, type ServerClock } from "@/lib/server-clock";
 import { getBrowserClient } from "@/lib/supabase/client";
@@ -31,17 +32,23 @@ export function useRoom(code: string, session: Session = null, hostToken: string
     if (!playerId || !playerToken) return refresh();
     try {
       const response = await fetch(`/api/rooms/${code}/reveal?playerId=${playerId}`, { cache: "no-store", headers: { "x-player-token": playerToken } });
-      const reveal = await response.json(); if (!response.ok) throw new Error(reveal.error);
+      const reveal = await response.json() as PlayerReveal & { error?: string }; if (!response.ok) throw new Error(reveal.error);
+      // Invalidate an older full refresh so it cannot overwrite this newer,
+      // authoritative reveal response with the preceding question state.
+      refreshSequence.current += 1;
       setState(previous => {
-        const next = previous?.question && previous.me ? ({ ...previous, room: { ...previous.room, status: "results" as const }, question: { ...previous.question, correctOptionId: reveal.correctOptionId }, me: { ...previous.me, answered: reveal.answered, selectedOptionId: reveal.selectedOptionId ?? undefined, wasCorrect: reveal.wasCorrect ?? undefined, lastPoints: reveal.lastPoints, score: reveal.score, correctAnswers: reveal.correctAnswers, streak: reveal.streak } }) : previous;
+        const next = previous ? applyPlayerReveal(previous, playerId, reveal) : previous;
         stateRef.current = next; return next;
       });
     } catch { await refresh(); }
   }, [code, playerId, playerToken, refresh]);
 
-  const applyHostReveal = useCallback((correctOptionId: string) => {
+  const applyHostReveal = useCallback((correctOptionId: string, players: RoomState["players"]) => {
+    // A visibility/online refresh started before reveal must not be allowed to
+    // replace these post-transaction standings with pre-reveal scores.
+    refreshSequence.current += 1;
     setState(previous => {
-      const next = previous?.question ? ({ ...previous, room: { ...previous.room, status: "results" as const }, question: { ...previous.question, correctOptionId } }) : previous;
+      const next = previous ? applyHostRevealState(previous, correctOptionId, players) : previous;
       stateRef.current = next; return next;
     });
   }, []);
@@ -53,23 +60,18 @@ export function useRoom(code: string, session: Session = null, hostToken: string
         previous.room.currentQuestion > expectedQuestion ||
         (previous.room.currentQuestion === expectedQuestion && ["results", "finished", "ended"].includes(previous.room.status))
       )) return previous;
-      const next: RoomState = {
-        ...previous,
-        room: { ...previous.room, ...transition.room },
-        question: transition.question,
-        ...(previous.me ? { me: { ...previous.me, answered: false, lastPoints: 0, selectedOptionId: undefined, wasCorrect: undefined } } : {})
-      };
+      const next = applyQuestionTransition(previous, transition, expectedQuestion, playerId);
       stateRef.current = next;
       return next;
     });
-  }, []);
+  }, [playerId]);
 
-  const markAnswered = useCallback(() => {
+  const markAnswered = useCallback((optionId: string) => {
     setState(previous => {
-      const next = previous?.me ? ({ ...previous, me: { ...previous.me, answered: true } }) : previous;
+      const next = previous && playerId ? applyAcceptedAnswer(previous, playerId, optionId) : previous;
       stateRef.current = next; return next;
     });
-  }, []);
+  }, [playerId]);
 
   useEffect(() => { setState(null); setError(""); }, [code, playerId]);
   useEffect(() => { void refresh(); }, [refresh]);
