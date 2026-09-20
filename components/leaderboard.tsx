@@ -2,11 +2,10 @@ import { Crown, Medal } from "lucide-react";
 import { Avatar } from "@/components/avatar";
 import type { PlayerView } from "@/lib/types";
 import { normalizePlayerView } from "@/lib/runtime-normalization";
+import { rankPlayers as sortPlayers } from "@/lib/player-ranking";
 
 export function rankPlayers(players: PlayerView[]) {
-  return (Array.isArray(players) ? players : [])
-    .map(player => normalizePlayerView(player))
-    .sort((a, b) => b.score - a.score || b.correctAnswers - a.correctAnswers || a.nickname.localeCompare(b.nickname) || a.id.localeCompare(b.id));
+  return sortPlayers((Array.isArray(players) ? players : []).map(player => normalizePlayerView(player)));
 }
 
 export function Leaderboard({ players, meId, compact = false, skip = 0 }: { players: PlayerView[]; meId?: string; compact?: boolean; skip?: number }) {
@@ -28,5 +27,5 @@ export function Podium({ players }: { players: PlayerView[] }) {
     if (!player) return <div key={index}/>;
     const place = (index === 1 ? 1 : index === 0 ? 2 : 3) as 1 | 2 | 3; const style = podiumStyles[place]; const Icon = style.icon;
     return <div key={player.id} className="flex min-w-0 flex-col items-center"><div className="relative"><Avatar config={player.avatar} size={place === 1 ? 88 : 68} className={`ring-4 ${style.ring}`}/>{place === 1 && <Crown aria-hidden className="absolute -top-7 left-1/2 -translate-x-1/2 rotate-[-8deg] fill-[#F7C948] text-[#B87900]" size={32}/>}</div><p className="mt-3 max-w-full truncate px-1 font-bold">{player.nickname}</p><p className="text-sm font-bold text-ink/55">{player.score.toLocaleString()} pts</p><div className={`mt-3 flex w-full flex-col items-center rounded-t-3xl bg-gradient-to-b p-3 text-white shadow-[inset_0_2px_0_rgba(255,255,255,.35)] ${style.height} ${style.background}`}><Icon aria-hidden className="mb-1" size={place === 1 ? 30 : 24}/><span className="font-[family-name:var(--font-display)] text-4xl font-bold">{place}</span><span className="mt-1 text-xs font-extrabold uppercase tracking-[.14em] opacity-90">{style.label}</span></div></div>;
-  })}</div><p className="mt-3 text-xs font-semibold text-ink/45">Ties are ordered by correct answers, then player name.</p></div>;
+  })}</div><p className="mt-3 text-xs font-semibold text-ink/45">{players.some(player => player.speedRankingEnabled) ? "Equal scores are ordered by fastest cumulative correct-answer time, then player name." : "Ties are ordered by correct answers, then player name."}</p></div>;
 }

@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { getAdminClient } from "@/lib/supabase/server";
 import { apiError } from "@/lib/server/http";
 import { roomCodeSchema } from "@/lib/validation";
-import { toSafeCount } from "@/lib/runtime-normalization";
 
 export const dynamic = "force-dynamic";
 
@@ -23,35 +22,9 @@ function loadTransition(code: string, expectedQuestion: number) {
   if (existing) return existing;
   const pending = (async (): Promise<TransitionResult> => {
     const db = getAdminClient();
-    const { data: room, error: roomError } = await db.from("game_rooms")
-      .select("id,status,current_question,question_started_at,question_ends_at,answer_count,quiz_id")
-      .eq("code", code).order("created_at", { ascending: false }).limit(1).maybeSingle();
-    if (roomError && roomError.code !== "PGRST116") throw roomError;
-    if (!room) return { kind: "missing" };
-    if (room.status !== "question" || room.current_question !== expectedQuestion) return { kind: "moved", status: room.status };
-    const { data: question, error: questionError } = await db.from("questions")
-      .select("id,prompt,position,time_limit_seconds,question_options(id,text,position)")
-      .eq("quiz_id", room.quiz_id).eq("position", room.current_question).maybeSingle();
-    if (questionError) throw questionError;
-    if (!question) return { kind: "question-missing" };
-    const options = [...(question.question_options ?? [])].sort((a, b) => a.position - b.position);
-    return {
-      kind: "ok",
-      room: {
-        status: "question",
-        currentQuestion: room.current_question,
-        questionStartedAt: room.question_started_at,
-        questionEndsAt: room.question_ends_at,
-        answerCount: toSafeCount(room.answer_count)
-      },
-      question: {
-        id: question.id,
-        number: question.position + 1,
-        prompt: question.prompt,
-        timeLimit: question.time_limit_seconds,
-        options: options.map(option => ({ id: option.id, text: option.text, position: option.position }))
-      }
-    };
+    const { data, error } = await db.rpc("get_quiz_room_transition", { p_room_code: code, p_question_index: expectedQuestion });
+    if (error) throw error;
+    return data as TransitionResult;
   })();
   inFlightTransitions.set(key, pending);
   const clear = () => { if (inFlightTransitions.get(key) === pending) inFlightTransitions.delete(key); };

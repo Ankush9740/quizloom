@@ -47,6 +47,12 @@ export function toSafeCount(value: unknown, fallback = 0): number {
   return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : fallback;
 }
 
+function toSafeNullableCount(value: unknown, fallback: number | null = null): number | null {
+  if (value === null || value === undefined || value === "") return fallback;
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : fallback;
+}
+
 /** Normalizes one player independently so a bad realtime row cannot poison the full room render. */
 export function normalizePlayerView(value: unknown, existing?: PlayerView): PlayerView {
   const row = value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -58,6 +64,8 @@ export function normalizePlayerView(value: unknown, existing?: PlayerView): Play
     avatar: normalizeAvatarConfig(avatarSource),
     score: toSafeCount(row.score, existing?.score ?? 0),
     correctAnswers: toSafeCount(row.correct_answers ?? row.correctAnswers, existing?.correctAnswers ?? 0),
-    streak: toSafeCount(row.streak, existing?.streak ?? 0)
+    streak: toSafeCount(row.streak, existing?.streak ?? 0),
+    correctResponseTimeMs: toSafeNullableCount(row.correct_response_time_ms ?? row.correctResponseTimeMs, existing?.correctResponseTimeMs ?? null),
+    speedRankingEnabled: typeof row.speedRankingEnabled === "boolean" ? row.speedRankingEnabled : existing?.speedRankingEnabled ?? false
   };
 }

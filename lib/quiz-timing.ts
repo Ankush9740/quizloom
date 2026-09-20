@@ -1,0 +1,3 @@
+export const QUESTION_START_LEAD_MS = 3_000;
+export const MIN_QUESTION_SECONDS = 5;
+export const MAX_QUESTION_SECONDS = 300;

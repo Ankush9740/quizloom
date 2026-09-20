@@ -18,7 +18,7 @@ export type AvatarConfig = {
 
 export type QuizDraftQuestion = {
   prompt: string;
-  timeLimit: number;
+  timeLimit: string;
   options: [string, string, string, string];
   correctIndex: number;
 };
@@ -51,6 +51,8 @@ export type PlayerView = {
   score: number;
   correctAnswers: number;
   streak: number;
+  correctResponseTimeMs: number | null;
+  speedRankingEnabled: boolean;
 };
 
 export type RoomQuestion = { id: string; number: number; prompt: string; timeLimit: number; options: { id: string; text: string; position: number }[]; correctOptionId?: string };

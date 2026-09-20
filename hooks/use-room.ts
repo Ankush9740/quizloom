@@ -5,6 +5,7 @@ import { applyAcceptedAnswer, applyHostRevealState, applyPlayerReveal, applyQues
 import { normalizePlayerView, toSafeCount } from "@/lib/runtime-normalization";
 import { estimateServerClock, type ServerClock } from "@/lib/server-clock";
 import { getBrowserClient } from "@/lib/supabase/client";
+import { comparePlayerRank } from "@/lib/player-ranking";
 
 type Session = { playerId: string; playerToken: string } | null;
 export function useRoom(code: string, session: Session = null, hostToken: string | null = null) {
@@ -100,7 +101,7 @@ export function useRoom(code: string, session: Session = null, hostToken: string
           if (typeof row.nickname !== "string" || !row.nickname.trim() || !row.avatar_config) continue;
           changed = true; nextPlayers.push(normalizePlayerView({ ...row, id }));
         }
-        return changed ? { ...previous, players: nextPlayers.sort((a,b) => b.score - a.score || b.correctAnswers - a.correctAnswers || a.nickname.localeCompare(b.nickname) || a.id.localeCompare(b.id)) } : previous;
+        return changed ? { ...previous, players: nextPlayers.sort(comparePlayerRank) } : previous;
       });
     };
     const channel = db.channel(`updates:${roomId}`)

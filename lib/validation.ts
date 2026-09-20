@@ -9,7 +9,7 @@ export const avatarSchema = z.object({
   character: z.enum(["custom", "cat", "dog", "panda", "fox", "frog", "bear", "rabbit", "tiger", "lion", "elephant", "penguin", "owl", "wolf", "koala", "red-panda", "shark", "dinosaur", "cartoon-kid", "hero", "geek", "ninja", "pirate", "explorer", "astronaut", "wizard", "knight", "robot", "alien", "monster", "dragon", "superhero"]).optional()
 });
 export const questionSchema = z.object({
-  prompt: z.string().trim().min(5).max(240), timeLimit: z.number().int().min(5).max(120),
+  prompt: z.string().trim().min(5).max(240), timeLimit: z.number().int().min(5).max(300),
   options: z.tuple([z.string().trim().min(1).max(120), z.string().trim().min(1).max(120), z.string().trim().min(1).max(120), z.string().trim().min(1).max(120)]),
   correctIndex: z.number().int().min(0).max(3)
 });
@@ -22,7 +22,7 @@ export const portableQuestionSchema = z.object({
     z.string().trim().min(1).max(120), z.string().trim().min(1).max(120)
   ]),
   correctAnswer: z.number().int().min(0).max(3),
-  timeLimit: z.number().int().min(5).max(120)
+  timeLimit: z.number().int().min(5, "Question timers must be at least 5 seconds").max(300, "Question timers cannot exceed 300 seconds")
 }).strict();
 
 export const portableQuizSchema = z.object({

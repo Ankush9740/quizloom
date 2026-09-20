@@ -26,6 +26,7 @@ async function sampledState(path, headers, wallClockSkewMs = 0) {
 
 const avatarOne = { base: "bean", skin: "#FFB38A", eyes: "happy", head: "sprout", accessory: "none", accent: "#3155E7" };
 const avatarTwo = { base: "bot", skin: "#9EB4FF", eyes: "dot", head: "none", accessory: "none", accent: "#14213D", character: "robot" };
+const waitForQuestionStart = state => new Promise(resolve => setTimeout(resolve, Math.max(0, new Date(state.room.questionStartedAt).getTime() - Date.now()) + 100));
 const quizDocument = {
   version: 1,
   title: `Regression ${Date.now()}`,
@@ -90,6 +91,7 @@ try {
   if (timings.timerDifferenceMs > 1_000) throw new Error(`Calibrated host/player timers differed by ${timings.timerDifferenceMs}ms`);
   const savedAvatars = new Map(state.players.map(player => [player.nickname, player.avatar]));
   if (savedAvatars.get("CorrectTester")?.base !== avatarOne.base || savedAvatars.get("CorrectTester")?.character !== "custom" || savedAvatars.get("WrongTester")?.character !== avatarTwo.character) throw new Error("Legacy or themed player avatar configuration did not persist");
+  await waitForQuestionStart(state);
   const submitStarted = performance.now();
   await Promise.all(joinedPlayers.slice(0, 19).map((player, index) => submit(room, player, state.question.options[index === 0 ? 0 : 1].id)));
   timings.concurrentSubmitMs = Math.round(performance.now() - submitStarted);
@@ -116,6 +118,7 @@ try {
   const secondDeadline = new Date(state.room.questionEndsAt).getTime();
   if (secondDeadline - secondStartedAt !== 60_000 || secondDeadline === firstDeadline) throw new Error("The next question did not receive a fresh authoritative 60-second deadline");
   const finalOptionId = state.question.options[0].id;
+  await waitForQuestionStart(state);
   await submit(room, playerOne, finalOptionId);
   state = await stateFor(room, playerOne);
   if (state.room.answerCount !== 1) throw new Error("Second-question answer counter failed");
@@ -161,7 +164,7 @@ try {
   await hostAction(deadlineRoom, "start");
   const deadlineState = await stateFor(deadlineRoom, deadlinePlayer);
   if (new Date(deadlineState.room.questionEndsAt).getTime() - new Date(deadlineState.room.questionStartedAt).getTime() !== 5_000) throw new Error("Short deadline fixture did not receive the configured duration");
-  await new Promise(resolve => setTimeout(resolve, 6_000));
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, new Date(deadlineState.room.questionEndsAt).getTime() - Date.now()) + 1_000));
   const lateAnswer = await submit(deadlineRoom, deadlinePlayer, deadlineState.question.options[0].id, 400);
   if (!String(lateAnswer.body.error).includes("Time is up")) throw new Error("The server did not reject an answer submitted after the authoritative deadline");
   await hostAction(deadlineRoom, "end");

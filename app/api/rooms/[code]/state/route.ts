@@ -4,6 +4,7 @@ import { apiError } from "@/lib/server/http";
 import { safeEqualHash } from "@/lib/server/session";
 import { roomCodeSchema } from "@/lib/validation";
 import { normalizePlayerView, toSafeCount } from "@/lib/runtime-normalization";
+import { comparePlayerRank } from "@/lib/player-ranking";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     const code = roomCodeSchema.parse((await params).code);
     const db = getAdminClient();
     const { data: room, error } = await db.from("game_rooms")
-      .select("id,code,status,current_question,question_started_at,question_ends_at,answer_count,quiz_id,quizzes(title)")
+      .select("id,code,status,current_question,question_started_at,question_ends_at,answer_count,quiz_id,speed_ranking_enabled,quizzes(title)")
       .eq("code", code).order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (error && error.code !== "PGRST116") throw error;
     if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -26,7 +27,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     // answer state without another full room request.
     const shouldLoadPlayer = Boolean(playerId);
     const [playersResult, countResult, questionResult, roomSecretResult, playerResult, playerSecretResult] = await Promise.all([
-      db.from("players").select("id,nickname,avatar_config,score,correct_answers,streak,joined_at").eq("room_id", room.id).order("joined_at"),
+      db.from("players").select("id,nickname,avatar_config,score,correct_answers,streak,correct_response_time_ms,joined_at").eq("room_id", room.id).order("joined_at"),
       db.from("questions").select("id", { count: "exact", head: true }).eq("quiz_id", room.quiz_id),
       shouldLoadQuestion
         ? db.from("questions").select("id,prompt,position,time_limit_seconds,question_options(id,text,position,is_correct)").eq("quiz_id", room.quiz_id).eq("position", room.current_question).maybeSingle()
@@ -35,7 +36,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
         ? db.from("room_secrets").select("host_token_hash").eq("room_id", room.id).maybeSingle()
         : Promise.resolve({ data: null, error: null }),
       shouldLoadPlayer
-        ? db.from("players").select("id,nickname,avatar_config,score,correct_answers,streak").eq("id", playerId).eq("room_id", room.id).maybeSingle()
+        ? db.from("players").select("id,nickname,avatar_config,score,correct_answers,streak,correct_response_time_ms").eq("id", playerId).eq("room_id", room.id).maybeSingle()
         : Promise.resolve({ data: null, error: null }),
       shouldLoadPlayer
         ? db.from("player_secrets").select("player_token_hash").eq("player_id", playerId).maybeSingle()
@@ -50,10 +51,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     const hostAuthenticated = Boolean(roomSecretResult.data && safeEqualHash(hostToken, roomSecretResult.data.host_token_hash));
     const standingsVisible = publicStatus === "finished" || hostAuthenticated;
     const playerViews = (playersResult.data ?? []).map(player => {
-      const view = normalizePlayerView(player);
-      return standingsVisible ? view : { ...view, score: 0, correctAnswers: 0, streak: 0 };
+      const normalized = normalizePlayerView(player);
+      const view = { ...normalized, speedRankingEnabled: standingsVisible && room.speed_ranking_enabled, correctResponseTimeMs: standingsVisible && room.speed_ranking_enabled && normalized.correctAnswers > 0 ? normalized.correctResponseTimeMs : null };
+      return standingsVisible ? view : { ...view, score: 0, correctAnswers: 0, streak: 0, correctResponseTimeMs: null };
     });
-    if (standingsVisible) playerViews.sort((a, b) => b.score - a.score || b.correctAnswers - a.correctAnswers || a.nickname.localeCompare(b.nickname) || a.id.localeCompare(b.id));
+    if (standingsVisible) playerViews.sort(comparePlayerRank);
 
     const response: Record<string, unknown> = {
       room: {
@@ -74,7 +76,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     const secret = playerSecretResult.data;
     const playerAuthenticated = Boolean(player && secret && safeEqualHash(request.headers.get("x-player-token"), secret.player_token_hash));
     if (playerAuthenticated && player) {
-      response.me = { ...normalizePlayerView(player), answered: false, lastPoints: 0 };
+      response.me = { ...normalizePlayerView(player), correctResponseTimeMs: null, speedRankingEnabled: false, answered: false, lastPoints: 0 };
     }
 
     const current = questionResult.data;
@@ -96,6 +98,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
         if (answerError) throw answerError;
         response.me = {
           ...normalizePlayerView(player),
+          correctResponseTimeMs: null,
+          speedRankingEnabled: false,
           answered: Boolean(answer),
           lastPoints: toSafeCount(answer?.points_awarded),
           ...(room.status === "results" && answer ? { selectedOptionId: answer.selected_option_id, wasCorrect: answer.is_correct } : {})

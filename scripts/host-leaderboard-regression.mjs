@@ -16,6 +16,7 @@ async function request(path, options = {}, expectedStatus) {
 function standings(players) {
   return Object.fromEntries(players.map(player => [player.nickname, player.score]));
 }
+const waitForQuestionStart = state => new Promise(resolve => setTimeout(resolve, Math.max(0, new Date(state.room.questionStartedAt).getTime() - Date.now()) + 100));
 
 let quiz;
 let room;
@@ -58,6 +59,7 @@ try {
 
   await hostAction("start");
   let state = await playerState(ada);
+  await waitForQuestionStart(state);
   await Promise.all([answer(ada, state.question.options[0].id), answer(ben, state.question.options[1].id)]);
   let reveal = await hostAction("reveal");
   assert.deepEqual(standings(reveal.players), { Ada: 7, Ben: 0, Cy: 0 }, "Reveal response must contain correct, incorrect, and unanswered totals");
@@ -72,6 +74,7 @@ try {
 
   await hostAction("next");
   state = await playerState(ada);
+  await waitForQuestionStart(state);
   await Promise.all([answer(ada, state.question.options[1].id), answer(ben, state.question.options[0].id)]);
   reveal = await hostAction("reveal");
   assert.deepEqual(standings(reveal.players), { Ada: 7, Ben: 7, Cy: 0 }, "Scores must accumulate authoritatively across questions");

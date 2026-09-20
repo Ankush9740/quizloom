@@ -28,3 +28,9 @@ export function deadlineRemainingMs(deadline: string | null, clock: ServerClock 
   if (!Number.isFinite(deadlineMs)) return 0;
   return Math.max(0, deadlineMs - currentServerTime(clock, monotonicNowMs, wallNowMs));
 }
+
+export function timeUntilStartMs(startedAt: string | null, clock: ServerClock | null, monotonicNowMs: number, wallNowMs: number) {
+  const startedAtMs = new Date(startedAt ?? 0).getTime();
+  if (!Number.isFinite(startedAtMs)) return 0;
+  return Math.max(0, startedAtMs - currentServerTime(clock, monotonicNowMs, wallNowMs));
+}

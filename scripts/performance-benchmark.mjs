@@ -3,9 +3,11 @@ import { createClient } from "@supabase/supabase-js";
 
 const baseUrl = process.env.QUIZLOOM_TEST_URL ?? "http://127.0.0.1:3000";
 const mode = process.argv.find(arg => arg.startsWith("--mode="))?.split("=")[1] ?? "legacy";
+const delivery = process.argv.find(arg => arg.startsWith("--delivery="))?.split("=")[1] ?? "realtime";
 const playerCounts = (process.argv.find(arg => arg.startsWith("--players="))?.split("=")[1] ?? "2,10,20").split(",").map(Number);
 const questionCount = Number(process.argv.find(arg => arg.startsWith("--questions="))?.split("=")[1] ?? 6);
 if (!['legacy', 'optimized'].includes(mode)) throw new Error("--mode must be legacy or optimized");
+if (!['realtime', 'direct'].includes(delivery)) throw new Error("--delivery must be realtime or direct");
 
 for (const line of readFileSync(".env.local", "utf8").split(/\r?\n/)) {
   const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
@@ -45,7 +47,7 @@ function summarize(values) {
 }
 
 function makeMetrics() {
-  return { actionHttp: [], realtimeAfterClick: [], realtimeAfterResponse: [], followupHydration: [], stateReadyAfterClick: [] };
+  return { actionHttp: [], realtimeAfterClick: [], realtimeAfterResponse: [], followupHydration: [], stateReadyAfterClick: [], scheduledStartHeadroom: [], authoritativeDuration: [] };
 }
 
 function summarizeMetrics(metrics) {
@@ -80,36 +82,58 @@ async function runPopulation(playerCount) {
       body: JSON.stringify({ code: room.code, nickname: `Perf${playerCount}P${index + 1}`, avatar })
     }, 201)).body));
 
-    const hostClient = createClient(supabaseUrl, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
-    clients.push(hostClient);
-    const hostChannel = hostClient.channel(`perf-host-${room.roomId}`).on("postgres_changes", {
-      event: "UPDATE", schema: "public", table: "game_rooms", filter: `id=eq.${room.roomId}`
-    }, payload => activeTracker?.onHostEvent(payload.new));
-    channels.push([hostClient, hostChannel]);
-
-    for (let index = 0; index < playerCount; index++) {
-      const client = createClient(supabaseUrl, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
-      clients.push(client);
-      const channel = client.channel(`perf-player-${room.roomId}-${index}`).on("postgres_changes", {
+    if (delivery === "realtime") {
+      const hostClient = createClient(supabaseUrl, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+      clients.push(hostClient);
+      const hostChannel = hostClient.channel(`perf-host-${room.roomId}`).on("postgres_changes", {
         event: "UPDATE", schema: "public", table: "game_rooms", filter: `id=eq.${room.roomId}`
-      }, payload => activeTracker?.onPlayerEvent(index, payload.new));
-      channels.push([client, channel]);
+      }, payload => activeTracker?.onHostEvent(payload.new));
+      channels.push([hostClient, hostChannel]);
+
+      for (let index = 0; index < playerCount; index++) {
+        const client = createClient(supabaseUrl, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
+        clients.push(client);
+        const channel = client.channel(`perf-player-${room.roomId}-${index}`).on("postgres_changes", {
+          event: "UPDATE", schema: "public", table: "game_rooms", filter: `id=eq.${room.roomId}`
+        }, payload => activeTracker?.onPlayerEvent(index, payload.new));
+        channels.push([client, channel]);
+      }
+      await Promise.all(channels.map(([, channel]) => new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Realtime subscription timed out")), 15000);
+        channel.subscribe(status => {
+          if (status === "SUBSCRIBED") { clearTimeout(timeout); resolve(); }
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") { clearTimeout(timeout); reject(new Error(`Realtime subscription failed: ${status}`)); }
+        });
+      })));
     }
-    await Promise.all(channels.map(([, channel]) => new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Realtime subscription timed out")), 15000);
-      channel.subscribe(status => {
-        if (status === "SUBSCRIBED") { clearTimeout(timeout); resolve(); }
-        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") { clearTimeout(timeout); reject(new Error(`Realtime subscription failed: ${status}`)); }
-      });
-    })));
 
     const stateFor = player => request(`/api/rooms/${room.code}/state?playerId=${player.playerId}`, { headers: { "x-player-token": player.playerToken } });
     const revealFor = player => request(`/api/rooms/${room.code}/reveal?playerId=${player.playerId}`, { headers: { "x-player-token": player.playerToken } });
     const hostAction = action => request("/api/host/action", { method: "POST", headers: { "Content-Type": "application/json", "x-host-token": room.hostToken }, body: JSON.stringify({ code: room.code, action }) });
+    const hostState = () => request(`/api/rooms/${room.code}/state`, { headers: { "x-host-token": room.hostToken } });
 
     async function measureTransition(kind, action, predicate, followup) {
       const sample = metrics[kind];
       const clickAt = performance.now();
+      if (delivery === "direct") {
+        const actionResult = await hostAction(action);
+        sample.actionHttp.push(actionResult.elapsedMs);
+        await Promise.all(players.map(async player => {
+          const hydrateStartedAt = performance.now();
+          let hydrated;
+          if (followup === "state" && (mode === "legacy" || kind === "finish")) hydrated = await stateFor(player);
+          else if (followup === "state") hydrated = await request(`/api/rooms/${room.code}/transition?question=${Number(actionResult.body.transition?.room?.currentQuestion)}`);
+          if (followup === "reveal") hydrated = await revealFor(player);
+          const readyAt = performance.now();
+          sample.followupHydration.push(readyAt - hydrateStartedAt);
+          sample.stateReadyAfterClick.push(readyAt - clickAt);
+          if ((kind === "start" || kind === "next") && hydrated?.body?.room?.questionStartedAt) {
+            sample.scheduledStartHeadroom.push(new Date(hydrated.body.room.questionStartedAt).getTime() - Date.now());
+            sample.authoritativeDuration.push(new Date(hydrated.body.room.questionEndsAt).getTime() - new Date(hydrated.body.room.questionStartedAt).getTime());
+          }
+        }));
+        return actionResult.body;
+      }
       let responseAt = null;
       let resolveAll;
       let rejectAll;
@@ -126,13 +150,18 @@ async function runPopulation(playerCount) {
           sample.realtimeAfterClick.push(eventAt - clickAt);
           try {
             const hydrateStartedAt = performance.now();
-            if (followup === "state" && (mode === "legacy" || kind === "finish")) await stateFor(players[index]);
-            else if (followup === "state") await request(`/api/rooms/${room.code}/transition?question=${Number(row.current_question)}`);
+            let hydrated;
+            if (followup === "state" && (mode === "legacy" || kind === "finish")) hydrated = await stateFor(players[index]);
+            else if (followup === "state") hydrated = await request(`/api/rooms/${room.code}/transition?question=${Number(row.current_question)}`);
             if (followup === "reveal") await revealFor(players[index]);
             await Promise.resolve();
             const readyAt = performance.now();
             sample.followupHydration.push(readyAt - hydrateStartedAt);
             sample.stateReadyAfterClick.push(readyAt - clickAt);
+            if ((kind === "start" || kind === "next") && hydrated?.body?.room?.questionStartedAt) {
+              sample.scheduledStartHeadroom.push(new Date(hydrated.body.room.questionStartedAt).getTime() - Date.now());
+              sample.authoritativeDuration.push(new Date(hydrated.body.room.questionEndsAt).getTime() - new Date(hydrated.body.room.questionStartedAt).getTime());
+            }
             if (responseAt !== null) sample.realtimeAfterResponse.push(Math.max(0, eventAt - responseAt));
             completed++;
             if (completed === playerCount) { clearTimeout(timeout); resolveAll(); }
@@ -150,6 +179,17 @@ async function runPopulation(playerCount) {
     async function measureAnswerCounter(questionNumber, optionId) {
       const sample = metrics.answerCounter;
       const clickAt = performance.now();
+      if (delivery === "direct") {
+        const result = await request("/api/answers", { method: "POST", headers: { "Content-Type": "application/json", "x-player-token": players[0].playerToken }, body: JSON.stringify({ code: room.code, playerId: players[0].playerId, optionId }) });
+        sample.actionHttp.push(result.elapsedMs);
+        const hydrateStartedAt = performance.now();
+        const state = await hostState();
+        if (Number(state.body.room.answerCount) !== 1) throw new Error("Authoritative answer count did not update");
+        const readyAt = performance.now();
+        sample.followupHydration.push(readyAt - hydrateStartedAt);
+        sample.stateReadyAfterClick.push(readyAt - clickAt);
+        return;
+      }
       let resolveEvent;
       let rejectEvent;
       const event = new Promise((resolve, reject) => { resolveEvent = resolve; rejectEvent = reject; });
@@ -179,6 +219,7 @@ async function runPopulation(playerCount) {
       const kind = question === 0 ? "start" : "next";
       await measureTransition(kind, kind, row => row.status === "question" && Number(row.current_question) === question, "state");
       const currentState = (await stateFor(players[0])).body;
+      await sleep(Math.max(0, new Date(currentState.room.questionStartedAt).getTime() - Date.now()) + 100);
       await measureAnswerCounter(question, currentState.question.options[0].id);
       await measureTransition("reveal", "reveal", row => row.status === "results" && Number(row.current_question) === question, "reveal");
     }
@@ -202,4 +243,4 @@ async function runPopulation(playerCount) {
 
 const results = {};
 for (const count of playerCounts) results[count] = await runPopulation(count);
-console.log(JSON.stringify({ mode, playerCounts, questionCount, environment: "local Next.js dev server with separate Supabase Realtime clients; not physical-device data", results }, null, 2));
+console.log(JSON.stringify({ mode, delivery, playerCounts, questionCount, environment: delivery === "realtime" ? "local Next.js dev server with separate Supabase Realtime clients; not physical-device data" : "local Next.js dev server with parallel direct transition/reveal hydration requests; excludes Realtime delivery and physical-device network delay", results }, null, 2));

@@ -4,7 +4,9 @@ import { getAdminClient } from "@/lib/supabase/server";
 import { apiError, assertDatabaseResult } from "@/lib/server/http";
 import { safeEqualHash } from "@/lib/server/session";
 import { roomCodeSchema } from "@/lib/validation";
-import { normalizePlayerView, toSafeCount } from "@/lib/runtime-normalization";
+import { normalizePlayerView } from "@/lib/runtime-normalization";
+import { comparePlayerRank } from "@/lib/player-ranking";
+import { QUESTION_START_LEAD_MS } from "@/lib/quiz-timing";
 
 const schema = z.object({ code: roomCodeSchema, action: z.enum(["start", "reveal", "next", "end"]) });
 
@@ -13,7 +15,7 @@ export async function POST(request: Request) {
     const body = schema.parse(await request.json());
     const db = getAdminClient();
     const { data: room, error: roomError } = await db.from("game_rooms")
-      .select("id,quiz_id,status,current_question,question_started_at,question_ends_at,answer_count,room_secrets(host_token_hash)")
+      .select("id,quiz_id,status,current_question,question_started_at,question_ends_at,answer_count,speed_ranking_enabled,room_secrets(host_token_hash)")
       .eq("code", body.code).order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (roomError && roomError.code !== "PGRST116") throw roomError;
     if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -42,72 +44,25 @@ export async function POST(request: Request) {
       // authoritative standings in the same host response instead of relying
       // on a separately delivered Realtime player event.
       const { data: playerRows, error: playersError } = await db.from("players")
-        .select("id,nickname,avatar_config,score,correct_answers,streak")
+        .select("id,nickname,avatar_config,score,correct_answers,streak,correct_response_time_ms")
         .eq("room_id", room.id);
       if (playersError) throw playersError;
-      const players = (playerRows ?? []).map(player => normalizePlayerView(player))
-        .sort((a, b) => b.score - a.score || b.correctAnswers - a.correctAnswers || a.nickname.localeCompare(b.nickname) || a.id.localeCompare(b.id));
+      const players = (playerRows ?? []).map(player => {
+        const normalized = normalizePlayerView(player);
+        return { ...normalized, speedRankingEnabled: room.speed_ranking_enabled, correctResponseTimeMs: room.speed_ranking_enabled && normalized.correctAnswers > 0 ? normalized.correctResponseTimeMs : null };
+      }).sort(comparePlayerRank);
       return NextResponse.json({ ok: true, status: "results", correctOptionId: (reveal as { correct_option_id: string }).correct_option_id, players });
     }
 
     if (body.action === "start" && room.status !== "lobby") return NextResponse.json({ error: "The quiz has already started" }, { status: 409 });
     if (body.action === "next" && room.status !== "results") return NextResponse.json({ error: "Reveal the answer before continuing" }, { status: 409 });
-    const index = body.action === "start" ? 0 : room.current_question + 1;
-    const { data: question, error: questionError } = await db.from("questions")
-      .select("id,prompt,position,time_limit_seconds,question_options(id,text,position)")
-      .eq("quiz_id", room.quiz_id).eq("position", index).maybeSingle();
-    if (questionError) throw questionError;
-
-    if (!question) {
-      const finished = await db.from("game_rooms").update({ status: "finished", updated_at: new Date().toISOString() })
-        .eq("id", room.id).select("status,current_question,question_started_at,question_ends_at,answer_count").single();
-      assertDatabaseResult(finished);
-      if (!finished.data) throw new Error("The room did not finish correctly");
-      return NextResponse.json({
-        ok: true,
-        transition: {
-          room: {
-            status: "finished",
-            currentQuestion: finished.data.current_question,
-            questionStartedAt: finished.data.question_started_at,
-            questionEndsAt: finished.data.question_ends_at,
-            answerCount: toSafeCount(finished.data.answer_count)
-          }
-        }
-      });
-    }
-
-    const startedAt = new Date();
-    const endsAt = new Date(startedAt.getTime() + question.time_limit_seconds * 1000);
-    const updated = await db.from("game_rooms").update({
-      status: "question",
-      current_question: index,
-      question_started_at: startedAt.toISOString(),
-      question_ends_at: endsAt.toISOString(),
-      answer_count: 0,
-      updated_at: startedAt.toISOString()
-    }).eq("id", room.id).select("status,current_question,question_started_at,question_ends_at,answer_count").single();
-    assertDatabaseResult(updated);
-    if (!updated.data) throw new Error("The question did not start correctly");
-    const options = [...(question.question_options ?? [])].sort((a, b) => a.position - b.position);
-    return NextResponse.json({
-      ok: true,
-      transition: {
-        room: {
-          status: "question",
-          currentQuestion: updated.data.current_question,
-          questionStartedAt: updated.data.question_started_at,
-          questionEndsAt: updated.data.question_ends_at,
-          answerCount: toSafeCount(updated.data.answer_count)
-        },
-        question: {
-          id: question.id,
-          number: question.position + 1,
-          prompt: question.prompt,
-          timeLimit: question.time_limit_seconds,
-          options: options.map(option => ({ id: option.id, text: option.text, position: option.position }))
-        }
-      }
+    const { data: transition, error: transitionError } = await db.rpc("transition_quiz_room", {
+      p_room_id: room.id,
+      p_action: body.action,
+      p_start_lead_ms: QUESTION_START_LEAD_MS
     });
+    if (transitionError) throw transitionError;
+    if (!transition) throw new Error("The room transition did not complete");
+    return NextResponse.json({ ok: true, transition });
   } catch (error) { return apiError(error); }
 }
