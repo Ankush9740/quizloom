@@ -5,8 +5,8 @@ import { QuickJoin } from "@/components/quick-join";
 
 export default function Home() {
   return <main className="grid-paper min-h-screen">
-    <nav className="mx-auto flex max-w-6xl items-center justify-between px-5 py-5"><Logo/><Link href="/host" className="btn-secondary hidden sm:inline-flex"><PencilRuler size={18}/> Build a quiz</Link></nav>
-    <section className="mx-auto grid max-w-6xl items-center gap-12 px-5 pb-16 pt-10 lg:grid-cols-[1.05fr_.95fr] lg:pt-20">
+    <nav className="mx-auto flex max-w-[90rem] items-center justify-between px-5 py-5 sm:px-6 xl:px-8"><Logo/><Link href="/host" className="btn-secondary hidden sm:inline-flex"><PencilRuler size={18}/> Build a quiz</Link></nav>
+    <section className="mx-auto grid max-w-[90rem] items-center gap-12 px-5 pb-16 pt-10 sm:px-6 lg:grid-cols-[1.05fr_.95fr] lg:pt-20 xl:grid-cols-[1.1fr_.9fr] xl:gap-20 xl:px-8">
       <div>
         <div className="mb-6 inline-flex items-center gap-2 rounded-full border-2 border-ink/10 bg-white px-4 py-2 text-sm font-bold"><Sparkles size={16} className="text-coral"/> Made for bright rooms</div>
         <h1 className="max-w-3xl font-[family-name:var(--font-display)] text-5xl font-bold leading-[.98] tracking-[-.055em] sm:text-7xl">Big questions.<br/><span className="text-blue">Every voice.</span></h1>
