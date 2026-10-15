@@ -7,6 +7,7 @@ import { Logo } from "@/components/logo";
 import { readJsonResponse } from "@/lib/client/http";
 import { forgetQuiz, getQuizAccess, getQuizToken, rememberQuiz } from "@/lib/quiz-library-client";
 import type { SavedQuizSummary } from "@/lib/types";
+import { startClientTrace } from "@/lib/client/performance";
 
 type QuizLibraryResponse = { quizzes: SavedQuizSummary[] };
 type QuizMutationResponse = { quizId: string; quizToken: string };
@@ -72,7 +73,9 @@ export function QuizLibrary() {
     if (!token) return;
     setBusyId(quiz.id); setNotice("");
     try {
-      const response = await fetch(`/api/quizzes/${quiz.id}`, { method: "POST", headers: { "x-quiz-token": token, "Accept": "application/json" } });
+      const trace = startClientTrace("room.create");
+      const response = await fetch(`/api/quizzes/${quiz.id}`, { method: "POST", headers: { "x-quiz-token": token, "Accept": "application/json", ...trace.header } });
+      trace.finish(response);
       const json = await readJsonResponse<RoomResponse>(response);
       sessionStorage.setItem(`quizloom:host:${json.code}`, json.hostToken);
       router.push(`/host/${json.code}`);

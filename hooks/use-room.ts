@@ -3,9 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { RoomState, RoomTransition } from "@/lib/types";
 import { applyAcceptedAnswer, applyHostRevealState, applyPlayerReveal, applyQuestionTransition, type PlayerReveal } from "@/lib/room-client-state";
 import { normalizePlayerView, toSafeCount } from "@/lib/runtime-normalization";
-import { estimateServerClock, type ServerClock } from "@/lib/server-clock";
+import { currentServerTime, estimateServerClock, type ServerClock } from "@/lib/server-clock";
 import { getBrowserClient } from "@/lib/supabase/client";
 import { comparePlayerRank } from "@/lib/player-ranking";
+import { recordClientDuration, startClientTrace } from "@/lib/client/performance";
 
 type Session = { playerId: string; playerToken: string } | null;
 export function useRoom(code: string, session: Session = null, hostToken: string | null = null) {
@@ -13,7 +14,9 @@ export function useRoom(code: string, session: Session = null, hostToken: string
   const [clock, setClock] = useState<ServerClock | null>(null); const refreshSequence = useRef(0);
   const playerId = session?.playerId; const playerToken = session?.playerToken;
   const stateRef = useRef<RoomState | null>(null);
+  const clockRef = useRef<ServerClock | null>(null);
   useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => { clockRef.current = clock; }, [clock]);
   const refresh = useCallback(async () => {
     const sequence = ++refreshSequence.current; const clientSentWallMs = Date.now();
     try {
@@ -24,7 +27,8 @@ export function useRoom(code: string, session: Session = null, hostToken: string
       const response = await fetch(`/api/rooms/${code}/state${query}`, { cache: "no-store", headers });
       const json = await response.json() as RoomState & { error?: string }; const clientReceivedWallMs = Date.now(); const clientReceivedMonotonicMs = performance.now(); if (!response.ok) throw new Error(json.error);
       if (sequence !== refreshSequence.current) return;
-      setClock(estimateServerClock(json.clock, clientSentWallMs, clientReceivedWallMs, clientReceivedMonotonicMs));
+      const nextClock = estimateServerClock(json.clock, clientSentWallMs, clientReceivedWallMs, clientReceivedMonotonicMs);
+      clockRef.current = nextClock; setClock(nextClock);
       stateRef.current = json; setState(json); setError("");
     } catch (e) { if (sequence === refreshSequence.current) setError(e instanceof Error ? e.message : "Could not refresh the room"); }
   }, [code, hostToken, playerId, playerToken]);
@@ -32,7 +36,9 @@ export function useRoom(code: string, session: Session = null, hostToken: string
   const applyReveal = useCallback(async () => {
     if (!playerId || !playerToken) return refresh();
     try {
-      const response = await fetch(`/api/rooms/${code}/reveal?playerId=${playerId}`, { cache: "no-store", headers: { "x-player-token": playerToken } });
+      const trace = startClientTrace("reveal.hydrate");
+      const response = await fetch(`/api/rooms/${code}/reveal?playerId=${playerId}`, { cache: "no-store", headers: { "x-player-token": playerToken, ...trace.header } });
+      trace.finish(response);
       const reveal = await response.json() as PlayerReveal & { error?: string }; if (!response.ok) throw new Error(reveal.error);
       // Invalidate an older full refresh so it cannot overwrite this newer,
       // authoritative reveal response with the preceding question state.
@@ -67,9 +73,9 @@ export function useRoom(code: string, session: Session = null, hostToken: string
     });
   }, [playerId]);
 
-  const markAnswered = useCallback((optionId: string) => {
+  const markAnswered = useCallback((optionId: string, expectedQuestionId: string) => {
     setState(previous => {
-      const next = previous && playerId ? applyAcceptedAnswer(previous, playerId, optionId) : previous;
+      const next = previous && playerId ? applyAcceptedAnswer(previous, playerId, optionId, expectedQuestionId) : previous;
       stateRef.current = next; return next;
     });
   }, [playerId]);
@@ -106,11 +112,23 @@ export function useRoom(code: string, session: Session = null, hostToken: string
     };
     const channel = db.channel(`updates:${roomId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "game_rooms", filter: `id=eq.${roomId}` }, payload => {
-        const next = payload.new as { status?: RoomState["room"]["status"]; current_question?: number; answer_count?: number; question_started_at?: string | null; question_ends_at?: string | null };
+        const next = payload.new as { status?: RoomState["room"]["status"]; current_question?: number; answer_count?: number; question_started_at?: string | null; question_ends_at?: string | null; updated_at?: string };
+        const updatedAtMs = new Date(next.updated_at ?? 0).getTime();
+        if (Number.isFinite(updatedAtMs) && clockRef.current) {
+          const receivedAtMs = currentServerTime(clockRef.current, performance.now(), Date.now());
+          recordClientDuration("realtime.room-delivery", Math.max(0, receivedAtMs - updatedAtMs), { status: next.status ?? "unknown" });
+        }
         if (next.status === "results") { if (playerId) void applyReveal(); return; }
         const current = stateRef.current;
         if (next.status === "question" && next.current_question === current?.room.currentQuestion && current?.room.status === "question") {
-          setState(previous => previous ? ({ ...previous, room: { ...previous.room, answerCount: toSafeCount(next.answer_count, previous.room.answerCount) } }) : previous);
+          // Players do not render the room-wide counter. Avoid rebuilding their
+          // entire room state for every other participant's submission.
+          if (playerId) return;
+          setState(previous => {
+            if (!previous) return previous;
+            const answerCount = toSafeCount(next.answer_count, previous.room.answerCount);
+            return answerCount === previous.room.answerCount ? previous : { ...previous, room: { ...previous.room, answerCount } };
+          });
           return;
         }
         if (next.status === "question" && Number.isInteger(next.current_question)) {
@@ -118,11 +136,13 @@ export function useRoom(code: string, session: Session = null, hostToken: string
           void (async () => {
             const clientSentWallMs = Date.now();
             try {
-              const response = await fetch(`/api/rooms/${code}/transition?question=${expectedQuestion}`, { cache: "no-store" });
+              const trace = startClientTrace("question.hydrate");
+              const response = await fetch(`/api/rooms/${code}/transition?question=${expectedQuestion}`, { cache: "no-store", headers: trace.header });
+              trace.finish(response);
               const transition = await response.json() as RoomTransition & { error?: string };
               const clientReceivedWallMs = Date.now(); const clientReceivedMonotonicMs = performance.now();
               if (!response.ok) { if (response.status === 409) return void refresh(); throw new Error(transition.error); }
-              if (transition.clock) setClock(estimateServerClock(transition.clock, clientSentWallMs, clientReceivedWallMs, clientReceivedMonotonicMs));
+              if (transition.clock) { const nextClock = estimateServerClock(transition.clock, clientSentWallMs, clientReceivedWallMs, clientReceivedMonotonicMs); clockRef.current = nextClock; setClock(nextClock); }
               applyRoomTransition(transition, expectedQuestion);
               setError("");
             } catch { void refresh(); }

@@ -26,7 +26,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     // lightweight question transition relies on it to build player-specific
     // answer state without another full room request.
     const shouldLoadPlayer = Boolean(playerId);
-    const [playersResult, countResult, questionResult, roomSecretResult, playerResult, playerSecretResult] = await Promise.all([
+    const [playersResult, countResult, questionResult, roomSecretResult, playerSecretResult] = await Promise.all([
       db.from("players").select("id,nickname,avatar_config,score,correct_answers,streak,correct_response_time_ms,joined_at").eq("room_id", room.id).order("joined_at"),
       db.from("questions").select("id", { count: "exact", head: true }).eq("quiz_id", room.quiz_id),
       shouldLoadQuestion
@@ -36,13 +36,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
         ? db.from("room_secrets").select("host_token_hash").eq("room_id", room.id).maybeSingle()
         : Promise.resolve({ data: null, error: null }),
       shouldLoadPlayer
-        ? db.from("players").select("id,nickname,avatar_config,score,correct_answers,streak,correct_response_time_ms").eq("id", playerId).eq("room_id", room.id).maybeSingle()
-        : Promise.resolve({ data: null, error: null }),
-      shouldLoadPlayer
         ? db.from("player_secrets").select("player_token_hash").eq("player_id", playerId).maybeSingle()
         : Promise.resolve({ data: null, error: null })
     ]);
-    for (const result of [playersResult, countResult, questionResult, roomSecretResult, playerResult, playerSecretResult]) {
+    for (const result of [playersResult, countResult, questionResult, roomSecretResult, playerSecretResult]) {
       if (result.error) throw result.error;
     }
 
@@ -72,7 +69,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
       players: playerViews
     };
 
-    const player = playerResult.data;
+    const player = shouldLoadPlayer ? (playersResult.data ?? []).find(candidate => candidate.id === playerId) ?? null : null;
     const secret = playerSecretResult.data;
     const playerAuthenticated = Boolean(player && secret && safeEqualHash(request.headers.get("x-player-token"), secret.player_token_hash));
     if (playerAuthenticated && player) {

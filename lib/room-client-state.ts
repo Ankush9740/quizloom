@@ -35,7 +35,8 @@ export function applyQuestionTransition(
   };
 }
 
-export function applyAcceptedAnswer(previous: RoomState, playerId: string, optionId: string): RoomState {
+export function applyAcceptedAnswer(previous: RoomState, playerId: string, optionId: string, expectedQuestionId?: string): RoomState {
+  if (expectedQuestionId && previous.question?.id !== expectedQuestionId) return previous;
   const player = currentPlayer(previous, playerId);
   if (!player) return previous;
   return {

@@ -24,11 +24,26 @@ export async function POST(request: Request) {
 }
 
 export async function insertQuestions(db: ReturnType<typeof getAdminClient>, quizId: string, questions: ReturnType<typeof portableQuizSchema.parse>["questions"]) {
-  for (let position = 0; position < questions.length; position++) {
-    const item = questions[position];
-    const { data: question, error } = await db.from("questions").insert({ quiz_id: quizId, prompt: item.question, position, time_limit_seconds: item.timeLimit }).select("id").single();
-    if (error) throw error;
-    const { error: optionsError } = await db.from("question_options").insert(item.options.map((text, optionPosition) => ({ question_id: question.id, text, position: optionPosition, is_correct: optionPosition === item.correctAnswer })));
-    if (optionsError) throw optionsError;
-  }
+  const { data: insertedQuestions, error } = await db.from("questions").insert(questions.map((item, position) => ({
+    quiz_id: quizId,
+    prompt: item.question,
+    position,
+    time_limit_seconds: item.timeLimit
+  }))).select("id,position");
+  if (error) throw error;
+  if (!insertedQuestions || insertedQuestions.length !== questions.length) throw new Error("Not every quiz question was saved");
+
+  const questionIdByPosition = new Map(insertedQuestions.map(question => [question.position, question.id]));
+  const options = questions.flatMap((item, position) => {
+    const questionId = questionIdByPosition.get(position);
+    if (!questionId) throw new Error("A saved question could not be matched to its answers");
+    return item.options.map((text, optionPosition) => ({
+      question_id: questionId,
+      text,
+      position: optionPosition,
+      is_correct: optionPosition === item.correctAnswer
+    }));
+  });
+  const { error: optionsError } = await db.from("question_options").insert(options);
+  if (optionsError) throw optionsError;
 }
