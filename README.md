@@ -106,6 +106,8 @@ To smoke-test manually: load the demo quiz, launch a room, join from two private
 
 With the development server running, `node scripts/regression-smoke.mjs` creates disposable test data, checks the library/create/edit/host/join/answer/reveal/scoring/delete API flow, and removes its test quizzes afterward.
 
+Database-backed load tests require an isolated Supabase project and fail closed when staging identity cannot be verified. Follow [the performance staging guide](docs/performance-staging.md); never run the performance scripts with production credentials.
+
 ## Deploy to Vercel
 
 1. Push the repository to GitHub and import it into Vercel.
