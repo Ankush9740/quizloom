@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { createRequire } from "node:module";
 import { loadStagingEnvironment } from "./lib/staging-environment.mjs";
 
 loadStagingEnvironment({ requireWriteConfirmation: true });
 
 const forwardedArguments = process.argv.slice(2).filter(argument => argument !== "--confirm-staging" && !argument.startsWith("--env-file="));
-const executable = resolve("node_modules", ".bin", process.platform === "win32" ? "next.cmd" : "next");
-const child = spawn(executable, ["dev", ...forwardedArguments], {
+const require = createRequire(import.meta.url);
+const nextCli = require.resolve("next/dist/bin/next");
+const child = spawn(process.execPath, [nextCli, "dev", ...forwardedArguments], {
   cwd: process.cwd(),
   env: process.env,
   stdio: "inherit",

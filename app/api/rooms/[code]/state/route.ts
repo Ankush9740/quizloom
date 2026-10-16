@@ -26,7 +26,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     // lightweight question transition relies on it to build player-specific
     // answer state without another full room request.
     const shouldLoadPlayer = Boolean(playerId);
-    const [playersResult, countResult, questionResult, roomSecretResult, playerSecretResult] = await Promise.all([
+    const [playersResult, countResult, questionResult, roomSecretResult, playerSecretResult, answerCountersResult] = await Promise.all([
       db.from("players").select("id,nickname,avatar_config,score,correct_answers,streak,correct_response_time_ms,joined_at").eq("room_id", room.id).order("joined_at"),
       db.from("questions").select("id", { count: "exact", head: true }).eq("quiz_id", room.quiz_id),
       shouldLoadQuestion
@@ -37,15 +37,23 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
         : Promise.resolve({ data: null, error: null }),
       shouldLoadPlayer
         ? db.from("player_secrets").select("player_token_hash").eq("player_id", playerId).maybeSingle()
-        : Promise.resolve({ data: null, error: null })
+        : Promise.resolve({ data: null, error: null }),
+      hostToken && room.status === "question"
+        ? db.from("room_answer_counters").select("bucket,answer_count").eq("room_id", room.id).eq("question_index", room.current_question)
+        : Promise.resolve({ data: [], error: null })
     ]);
-    for (const result of [playersResult, countResult, questionResult, roomSecretResult, playerSecretResult]) {
+    for (const result of [playersResult, countResult, questionResult, roomSecretResult, playerSecretResult, answerCountersResult]) {
       if (result.error) throw result.error;
     }
 
     const quiz = Array.isArray(room.quizzes) ? room.quizzes[0] : room.quizzes;
     const publicStatus = room.status === "finished" && room.current_question === -1 ? "ended" : room.status;
     const hostAuthenticated = Boolean(roomSecretResult.data && safeEqualHash(hostToken, roomSecretResult.data.host_token_hash));
+    const answerBuckets = hostAuthenticated && room.status === "question"
+      ? (answerCountersResult.data ?? []).map(row => ({ bucket: toSafeCount(row.bucket), count: toSafeCount(row.answer_count) }))
+      : [];
+    const bucketedAnswerCount = answerBuckets.reduce((sum, bucket) => sum + bucket.count, 0);
+    const legacyAnswerCount = toSafeCount(room.answer_count);
     const standingsVisible = publicStatus === "finished" || hostAuthenticated;
     const playerViews = (playersResult.data ?? []).map(player => {
       const normalized = normalizePlayerView(player);
@@ -64,7 +72,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
         questionCount: toSafeCount(countResult.count),
         questionStartedAt: room.question_started_at,
         questionEndsAt: room.question_ends_at,
-        answerCount: toSafeCount(room.answer_count)
+        answerCount: hostAuthenticated && room.status === "question" ? legacyAnswerCount + bucketedAnswerCount : legacyAnswerCount,
+        ...(hostAuthenticated && room.status === "question" ? { answerBuckets, legacyAnswerCount } : {})
       },
       players: playerViews
     };

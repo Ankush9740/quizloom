@@ -36,10 +36,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const trace = startServerTrace(request, "room.create");
   try {
     const id = idSchema.parse((await params).id); const db = getAdminClient();
-    if (!await canAccessQuiz(db, id, request.headers.get("x-quiz-token"))) return trace.response(NextResponse.json({ error: "Quiz access is not valid on this device" }, { status: 403 }));
-    trace.mark("authorize");
-    const result = await createRoomForQuiz(db, id, trace.mark);
-    if ("error" in result) return trace.response(NextResponse.json({ error: result.error }, { status: 409 }));
+    const result = await createRoomForQuiz(db, id, request.headers.get("x-quiz-token"), trace.mark);
+    if ("error" in result) return trace.response(NextResponse.json({ error: result.error }, { status: result.status }));
     return trace.response(NextResponse.json(result, { status: 201 }));
   } catch (error) { return trace.response(apiError(error)); }
 }

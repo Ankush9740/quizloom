@@ -42,22 +42,16 @@ export async function POST(request: Request) {
 
     if (body.action === "reveal") {
       if (room.status !== "question") return trace.response(NextResponse.json({ error: "There is no active question" }, { status: 409 }));
-      const { data: reveal, error: revealError } = await db.rpc("reveal_quiz_answer", { p_room_id: room.id }).single();
+      const { data: reveal, error: revealError } = await db.rpc("reveal_quiz_answer_with_standings", { p_room_id: room.id });
       trace.mark("reveal-rpc");
       if (revealError) throw revealError;
-      // The RPC has committed every score before it returns. Include those
-      // authoritative standings in the same host response instead of relying
-      // on a separately delivered Realtime player event.
-      const { data: playerRows, error: playersError } = await db.from("players")
-        .select("id,nickname,avatar_config,score,correct_answers,streak,correct_response_time_ms")
-        .eq("room_id", room.id);
-      if (playersError) throw playersError;
-      trace.mark("load-standings");
-      const players = (playerRows ?? []).map(player => {
+      const authoritative = reveal as { correctOptionId?: string; players?: Record<string, unknown>[] } | null;
+      if (!authoritative?.correctOptionId) throw new Error("The answer reveal did not complete");
+      const players = (authoritative.players ?? []).map(player => {
         const normalized = normalizePlayerView(player);
         return { ...normalized, speedRankingEnabled: room.speed_ranking_enabled, correctResponseTimeMs: room.speed_ranking_enabled && normalized.correctAnswers > 0 ? normalized.correctResponseTimeMs : null };
       }).sort(comparePlayerRank);
-      return trace.response(NextResponse.json({ ok: true, status: "results", correctOptionId: (reveal as { correct_option_id: string }).correct_option_id, players }));
+      return trace.response(NextResponse.json({ ok: true, status: "results", correctOptionId: authoritative.correctOptionId, players }));
     }
 
     if (body.action === "start" && room.status !== "lobby") return trace.response(NextResponse.json({ error: "The quiz has already started" }, { status: 409 }));

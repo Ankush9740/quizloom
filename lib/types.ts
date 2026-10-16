@@ -65,7 +65,7 @@ export type RoomTransition = {
 
 export type RoomState = {
   clock: { receivedAt: string; sentAt: string };
-  room: { id: string; code: string; title: string; status: "lobby" | "question" | "results" | "finished" | "ended"; currentQuestion: number; questionCount: number; questionStartedAt: string | null; questionEndsAt: string | null; answerCount: number };
+  room: { id: string; code: string; title: string; status: "lobby" | "question" | "results" | "finished" | "ended"; currentQuestion: number; questionCount: number; questionStartedAt: string | null; questionEndsAt: string | null; answerCount: number; answerBuckets?: { bucket: number; count: number }[]; legacyAnswerCount?: number };
   players: PlayerView[];
   question?: RoomQuestion;
   me?: PlayerView & { answered: boolean; lastPoints: number; selectedOptionId?: string; wasCorrect?: boolean };

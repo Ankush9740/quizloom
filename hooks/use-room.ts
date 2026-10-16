@@ -7,6 +7,7 @@ import { currentServerTime, estimateServerClock, type ServerClock } from "@/lib/
 import { getBrowserClient } from "@/lib/supabase/client";
 import { comparePlayerRank } from "@/lib/player-ranking";
 import { recordClientDuration, startClientTrace } from "@/lib/client/performance";
+import { mergeAnswerCounterBuckets } from "@/lib/answer-counter";
 
 type Session = { playerId: string; playerToken: string } | null;
 export function useRoom(code: string, session: Session = null, hostToken: string | null = null) {
@@ -29,7 +30,17 @@ export function useRoom(code: string, session: Session = null, hostToken: string
       if (sequence !== refreshSequence.current) return;
       const nextClock = estimateServerClock(json.clock, clientSentWallMs, clientReceivedWallMs, clientReceivedMonotonicMs);
       clockRef.current = nextClock; setClock(nextClock);
-      stateRef.current = json; setState(json); setError("");
+      setState(previous => {
+        let next = json;
+        if (hostToken && previous?.room.status === "question" && json.room.status === "question" && previous.room.currentQuestion === json.room.currentQuestion) {
+          const merged = mergeAnswerCounterBuckets(previous.room.answerBuckets, json.room.answerBuckets);
+          const legacyAnswerCount = Math.max(previous.room.legacyAnswerCount ?? 0, json.room.legacyAnswerCount ?? 0);
+          next = { ...json, room: { ...json.room, answerBuckets: merged.buckets, legacyAnswerCount, answerCount: legacyAnswerCount + merged.total } };
+        }
+        stateRef.current = next;
+        return next;
+      });
+      setError("");
     } catch (e) { if (sequence === refreshSequence.current) setError(e instanceof Error ? e.message : "Could not refresh the room"); }
   }, [code, hostToken, playerId, playerToken]);
 
@@ -110,48 +121,95 @@ export function useRoom(code: string, session: Session = null, hostToken: string
         return changed ? { ...previous, players: nextPlayers.sort(comparePlayerRank) } : previous;
       });
     };
-    const channel = db.channel(`updates:${roomId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "game_rooms", filter: `id=eq.${roomId}` }, payload => {
-        const next = payload.new as { status?: RoomState["room"]["status"]; current_question?: number; answer_count?: number; question_started_at?: string | null; question_ends_at?: string | null; updated_at?: string };
-        const updatedAtMs = new Date(next.updated_at ?? 0).getTime();
-        if (Number.isFinite(updatedAtMs) && clockRef.current) {
-          const receivedAtMs = currentServerTime(clockRef.current, performance.now(), Date.now());
-          recordClientDuration("realtime.room-delivery", Math.max(0, receivedAtMs - updatedAtMs), { status: next.status ?? "unknown" });
-        }
-        if (next.status === "results") { if (playerId) void applyReveal(); return; }
-        const current = stateRef.current;
-        if (next.status === "question" && next.current_question === current?.room.currentQuestion && current?.room.status === "question") {
-          // Players do not render the room-wide counter. Avoid rebuilding their
-          // entire room state for every other participant's submission.
-          if (playerId) return;
-          setState(previous => {
-            if (!previous) return previous;
-            const answerCount = toSafeCount(next.answer_count, previous.room.answerCount);
-            return answerCount === previous.room.answerCount ? previous : { ...previous, room: { ...previous.room, answerCount } };
-          });
-          return;
-        }
-        if (next.status === "question" && Number.isInteger(next.current_question)) {
-          const expectedQuestion = next.current_question as number;
-          void (async () => {
-            const clientSentWallMs = Date.now();
-            try {
-              const trace = startClientTrace("question.hydrate");
-              const response = await fetch(`/api/rooms/${code}/transition?question=${expectedQuestion}`, { cache: "no-store", headers: trace.header });
-              trace.finish(response);
-              const transition = await response.json() as RoomTransition & { error?: string };
-              const clientReceivedWallMs = Date.now(); const clientReceivedMonotonicMs = performance.now();
-              if (!response.ok) { if (response.status === 409) return void refresh(); throw new Error(transition.error); }
-              if (transition.clock) { const nextClock = estimateServerClock(transition.clock, clientSentWallMs, clientReceivedWallMs, clientReceivedMonotonicMs); clockRef.current = nextClock; setClock(nextClock); }
-              applyRoomTransition(transition, expectedQuestion);
-              setError("");
-            } catch { void refresh(); }
-          })();
-          return;
-        }
-        void refresh();
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "players", filter: `room_id=eq.${roomId}` }, payload => {
+    const handleRoomUpdate = (payload: { new: Record<string, unknown> }) => {
+      const next = payload.new as { status?: RoomState["room"]["status"]; current_question?: number; answer_count?: number; question_started_at?: string | null; question_ends_at?: string | null; updated_at?: string };
+      const updatedAtMs = new Date(next.updated_at ?? 0).getTime();
+      if (Number.isFinite(updatedAtMs) && clockRef.current) {
+        const receivedAtMs = currentServerTime(clockRef.current, performance.now(), Date.now());
+        recordClientDuration("realtime.room-delivery", Math.max(0, receivedAtMs - updatedAtMs), { status: next.status ?? "unknown" });
+      }
+      if (next.status === "results") { if (playerId) void applyReveal(); return; }
+      const current = stateRef.current;
+      if (next.status === "question" && next.current_question === current?.room.currentQuestion && current?.room.status === "question") {
+        setState(previous => {
+          if (!previous) return previous;
+          const legacyAnswerCount = Math.max(previous.room.legacyAnswerCount ?? 0, toSafeCount(next.answer_count));
+          const bucketedAnswerCount = (previous.room.answerBuckets ?? []).reduce((sum, bucket) => sum + bucket.count, 0);
+          const answerCount = legacyAnswerCount + bucketedAnswerCount;
+          if (answerCount === previous.room.answerCount && legacyAnswerCount === previous.room.legacyAnswerCount) return previous;
+          const updated = { ...previous, room: { ...previous.room, legacyAnswerCount, answerCount } };
+          stateRef.current = updated;
+          return updated;
+        });
+        return;
+      }
+      if (next.status === "question" && Number.isInteger(next.current_question)) {
+        const expectedQuestion = next.current_question as number;
+        void (async () => {
+          const clientSentWallMs = Date.now();
+          try {
+            const trace = startClientTrace("question.hydrate");
+            const response = await fetch(`/api/rooms/${code}/transition?question=${expectedQuestion}`, { cache: "no-store", headers: trace.header });
+            trace.finish(response);
+            const transition = await response.json() as RoomTransition & { error?: string };
+            const clientReceivedWallMs = Date.now(); const clientReceivedMonotonicMs = performance.now();
+            if (!response.ok) { if (response.status === 409) return void refresh(); throw new Error(transition.error); }
+            if (transition.clock) { const nextClock = estimateServerClock(transition.clock, clientSentWallMs, clientReceivedWallMs, clientReceivedMonotonicMs); clockRef.current = nextClock; setClock(nextClock); }
+            applyRoomTransition(transition, expectedQuestion);
+            setError("");
+          } catch { void refresh(); }
+        })();
+        return;
+      }
+      void refresh();
+    };
+    const channel = db.channel(`updates:${roomId}`, {
+      // Do not consider the channel live until its Postgres Changes listener
+      // can stream. This prevents a transition from falling into the gap
+      // between the channel join and replication readiness.
+      config: { postgres_changes_options: { wait: true } }
+    })
+      .on("system", {}, payload => {
+        // Supabase reports rate-limit, replication, and authorization failures
+        // as channel system errors. Reconcile immediately instead of waiting
+        // for a visibility change while the client reconnects.
+        if ((payload as { status?: string }).status === "error") void refresh();
+      });
+    if (playerId) {
+      // Phase transitions and answer counts share one row. Non-overlapping
+      // filters keep start/reveal/finish signals while excluding question-phase
+      // answer_count updates that player screens never render.
+      channel.on("postgres_changes", {
+        event: "UPDATE", schema: "public", table: "game_rooms",
+        filter: `id=eq.${roomId},status=eq.question,answer_count=eq.0`
+      }, handleRoomUpdate).on("postgres_changes", {
+        event: "UPDATE", schema: "public", table: "game_rooms",
+        filter: `id=eq.${roomId},status=in.(results,finished)`
+      }, handleRoomUpdate);
+    } else {
+      channel.on("postgres_changes", { event: "*", schema: "public", table: "game_rooms", filter: `id=eq.${roomId}` }, handleRoomUpdate);
+      channel.on("postgres_changes", {
+        event: "*", schema: "public", table: "room_answer_counters", filter: `room_id=eq.${roomId}`
+      }, payload => {
+        const row = (payload.eventType === "DELETE" ? payload.old : payload.new) as { question_index?: number; bucket?: number; answer_count?: number };
+        if (!Number.isInteger(row.question_index) || !Number.isInteger(row.bucket) || !Number.isInteger(row.answer_count)) return;
+        setState(previous => {
+          if (!previous || previous.room.status !== "question" || previous.room.currentQuestion !== row.question_index) return previous;
+          const merged = mergeAnswerCounterBuckets(previous.room.answerBuckets, [{ bucket: row.bucket as number, count: row.answer_count as number }]);
+          const answerCount = (previous.room.legacyAnswerCount ?? 0) + merged.total;
+          if (answerCount === previous.room.answerCount && merged.buckets.length === previous.room.answerBuckets?.length) return previous;
+          const next = { ...previous, room: { ...previous.room, answerBuckets: merged.buckets, answerCount } };
+          stateRef.current = next;
+          return next;
+        });
+      });
+    }
+    channel.on("postgres_changes", {
+        // Players only need later lobby joins. Reveal and final-state requests
+        // hydrate authoritative scores, so receiving every score UPDATE on
+        // every player device is redundant fan-out. Hosts still receive all.
+        event: playerId ? "INSERT" : "*", schema: "public", table: "players", filter: `room_id=eq.${roomId}`
+      }, payload => {
         const row = (payload.eventType === "DELETE" ? payload.old : payload.new) as Record<string, unknown>; const id = String(row.id ?? ""); if (!id) return;
         if (payload.eventType === "DELETE") { setState(previous => previous ? ({ ...previous, players: previous.players.filter(player => player.id !== id) }) : previous); return; }
         const existing = stateRef.current?.players.some(player => player.id === id);
@@ -159,8 +217,13 @@ export function useRoom(code: string, session: Session = null, hostToken: string
         if (playerId && payload.eventType === "UPDATE" && stateRef.current?.room.status !== "finished") return;
         pendingPlayers.set(id, row);
         frame ??= window.requestAnimationFrame(flushPlayers);
-      })
-      .subscribe(status => setConnected(status === "SUBSCRIBED"));
+      }).subscribe(status => {
+        const isSubscribed = status === "SUBSCRIBED";
+        setConnected(isSubscribed);
+        // One authoritative refresh after initial readiness and every rejoin
+        // recovers any transition that happened before or during disconnect.
+        if (isSubscribed) void refresh();
+      });
     return () => { if (frame !== null) window.cancelAnimationFrame(frame); void db.removeChannel(channel); };
   }, [state?.room.id, code, playerId, applyReveal, applyRoomTransition, refresh]);
   return { state, error, connected, clock, refresh, applyHostReveal, applyRoomTransition, markAnswered };

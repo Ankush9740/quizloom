@@ -29,7 +29,7 @@ export function applyQuestionTransition(
   const player = currentPlayer(previous, playerId);
   return {
     ...previous,
-    room: { ...previous.room, ...transition.room },
+    room: { ...previous.room, ...transition.room, answerBuckets: [], legacyAnswerCount: 0 },
     question: transition.question,
     ...(player ? { me: { ...player, answered: false, lastPoints: 0, selectedOptionId: undefined, wasCorrect: undefined } } : {})
   };

@@ -15,9 +15,13 @@
     "test:host-leaderboard": "node scripts/host-leaderboard-regression.mjs",
     "test:improvements:unit": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/multiplayer-improvements-unit.mjs",
     "test:performance:unit": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/performance-instrumentation-unit.mjs",
+    "test:realtime-startup:unit": "node scripts/realtime-startup-unit.mjs",
+    "test:backend-performance:unit": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/backend-performance-unit.mjs",
     "test:staging-guard": "node scripts/staging-guard-unit.mjs",
     "test:improvements": "node scripts/multiplayer-improvements-regression.mjs",
     "test:migration-006": "node scripts/verify-migration-006.mjs",
+    "test:migration-007": "node scripts/verify-migration-007.mjs",
+    "test:migration-007:security": "node scripts/migration-007-security-unit.mjs",
     "test:performance": "node scripts/performance-benchmark.mjs --mode=optimized --players=2,10,20,50 --questions=6 --runs=3",
     "test:performance:direct": "node scripts/performance-benchmark.mjs --mode=optimized --delivery=direct --players=2,10,20,50 --questions=6 --runs=3"
   },
