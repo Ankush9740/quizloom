@@ -8,6 +8,7 @@ import { getBrowserClient } from "@/lib/supabase/client";
 import { comparePlayerRank } from "@/lib/player-ranking";
 import { recordClientDuration, startClientTrace } from "@/lib/client/performance";
 import { mergeAnswerCounterBuckets } from "@/lib/answer-counter";
+import { derivePresenceState, equalStringSets } from "@/lib/presence-state";
 
 type Session = { playerId: string; playerToken: string } | null;
 export function useRoom(code: string, session: Session = null, hostToken: string | null = null) {
@@ -205,10 +206,10 @@ export function useRoom(code: string, session: Session = null, hostToken: string
       });
     }
     channel.on("postgres_changes", {
-        // Players only need later lobby joins. Reveal and final-state requests
-        // hydrate authoritative scores, so receiving every score UPDATE on
-        // every player device is redundant fan-out. Hosts still receive all.
-        event: playerId ? "INSERT" : "*", schema: "public", table: "players", filter: `room_id=eq.${roomId}`
+        // The anonymous projection contains lobby identity only. Players need
+        // later joins; hosts also receive identity updates/deletes. Scores are
+        // hydrated authoritatively by authenticated reveal/state responses.
+        event: playerId ? "INSERT" : "*", schema: "public", table: "room_player_presence", filter: `room_id=eq.${roomId}`
       }, payload => {
         const row = (payload.eventType === "DELETE" ? payload.old : payload.new) as Record<string, unknown>; const id = String(row.id ?? ""); if (!id) return;
         if (payload.eventType === "DELETE") { setState(previous => previous ? ({ ...previous, players: previous.players.filter(player => player.id !== id) }) : previous); return; }
@@ -235,7 +236,12 @@ export function usePresence(code: string, identity: { role: "host" } | { role: "
   useEffect(() => {
     const db = getBrowserClient(); if (!db || !role) return;
     const channel = db.channel(`presence:${code}`, { config: { presence: { key: role === "host" ? "host" : playerId! } } });
-    channel.on("presence", { event: "sync" }, () => { const ids = new Set<string>(); let host = false; Object.values(channel.presenceState()).flat().forEach((item: unknown) => { const p = item as { role?: string; playerId?: string }; if (p.role === "player" && p.playerId) ids.add(p.playerId); if (p.role === "host") host = true; }); setOnlineIds(ids); setHostOnline(host); setSynced(true); }).subscribe(status => { if (status === "SUBSCRIBED") void channel.track(role === "host" ? { role } : { role, playerId }); });
+    channel.on("presence", { event: "sync" }, () => {
+      const next = derivePresenceState(channel.presenceState(), role);
+      setOnlineIds(previous => equalStringSets(previous, next.onlineIds) ? previous : next.onlineIds);
+      setHostOnline(previous => previous === next.hostOnline ? previous : next.hostOnline);
+      setSynced(previous => previous || true);
+    }).subscribe(status => { if (status === "SUBSCRIBED") void channel.track(role === "host" ? { role } : { role, playerId }); });
     return () => { void channel.untrack(); void db.removeChannel(channel); };
   }, [code, role, playerId]);
   return { onlineIds, synced, hostOnline };

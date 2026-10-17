@@ -221,6 +221,8 @@ async function runPopulation(playerCount, runNumber) {
   const connectionGroups = [];
   const realtimeChannelHealth = new Map();
   const realtimeMessages = { hostRoom: 0, hostAnswerCounters: 0, playerRoom: 0, hostPlayerRows: 0, playerPlayerRows: 0, presenceSyncs: 0 };
+  const presenceDiagnostics = { hostSyncs: 0, playerSyncs: 0, successfulTrackCalls: 0 };
+  const answerCounterDiagnostics = [];
   const metrics = {
     quizCreate: makeMetrics(), roomCreate: makeMetrics(), join: makeMetrics(), start: makeMetrics(),
     answerSubmit: makeMetrics(), answerCounter: makeMetrics(), reveal: makeMetrics(), next: makeMetrics(),
@@ -306,11 +308,11 @@ async function runPopulation(playerCount, runNumber) {
       }, payload => { realtimeMessages.hostRoom++; activeTracker?.onHostEvent(payload.new); }).on("postgres_changes", {
         event: "*", schema: "public", table: "room_answer_counters", filter: `room_id=eq.${room.roomId}`
       }, payload => { realtimeMessages.hostAnswerCounters++; activeTracker?.onAnswerCounterEvent?.(payload.new); }).on("postgres_changes", {
-        event: "*", schema: "public", table: "players", filter: `room_id=eq.${room.roomId}`
+        event: "*", schema: "public", table: "room_player_presence", filter: `room_id=eq.${room.roomId}`
       }, () => { realtimeMessages.hostPlayerRows++; });
       registerChannel(hostClient, hostChannel, { role: "host", kind: "data" });
       const hostPresence = hostClient.channel(`perf-presence-${room.roomId}-${runNumber}`, { config: { presence: { key: "host" } } })
-        .on("presence", { event: "sync" }, () => { realtimeMessages.presenceSyncs++; });
+        .on("presence", { event: "sync" }, () => { realtimeMessages.presenceSyncs++; presenceDiagnostics.hostSyncs++; });
       registerChannel(hostClient, hostPresence, { role: "host", kind: "presence", presence: { role: "host" } });
       connectionGroups.push({
         role: "host",
@@ -335,14 +337,13 @@ async function runPopulation(playerCount, runNumber) {
           event: "UPDATE", schema: "public", table: "game_rooms",
           filter: `id=eq.${room.roomId},status=in.(results,finished)`
         }, payload => { realtimeMessages.playerRoom++; activeTracker?.onPlayerEvent(index, payload.new); }).on("postgres_changes", {
-          // Player clients need new lobby participants, but score updates are
-          // hydrated authoritatively by reveal/final-state requests. Avoid
-          // fanning every reveal update back to every simulated player.
-          event: "INSERT", schema: "public", table: "players", filter: `room_id=eq.${room.roomId}`
+          // Player clients need new lobby participants. The projection cannot
+          // expose score/ranking fields; reveal/final state stays authenticated.
+          event: "INSERT", schema: "public", table: "room_player_presence", filter: `room_id=eq.${room.roomId}`
         }, () => { realtimeMessages.playerPlayerRows++; });
         registerChannel(client, channel, { role: "player", kind: "data", playerNumber: index + 1 });
         const presence = client.channel(`perf-presence-${room.roomId}-${runNumber}`, { config: { presence: { key: players[index].playerId } } })
-          .on("presence", { event: "sync" }, () => { realtimeMessages.presenceSyncs++; });
+          .on("presence", { event: "sync" }, () => { realtimeMessages.presenceSyncs++; presenceDiagnostics.playerSyncs++; });
         registerChannel(client, presence, { role: "player", kind: "presence", playerNumber: index + 1, presence: { role: "player", playerId: players[index].playerId } });
         connectionGroups.push({
           role: "player",
@@ -371,6 +372,7 @@ async function runPopulation(playerCount, runNumber) {
         if (trackResult !== "ok") {
           throw new Error(`Realtime presence tracking failed: ${trackResult} (${channelHealthSummary()})`);
         }
+        presenceDiagnostics.successfulTrackCalls++;
       }, {
         batchSize: realtimePresenceBatchSize,
         staggerMs: realtimePresenceStaggerMs
@@ -547,6 +549,18 @@ async function runPopulation(playerCount, runNumber) {
       const clickAt = performance.now();
       let waitForFinalCounter = Promise.resolve();
       let highestAnswerCount = 0;
+      const diagnostic = {
+        questionNumber,
+        expectedCount: playerCount,
+        rawMatchingEvents: 0,
+        invalidEvents: 0,
+        staleOrDuplicateEvents: 0,
+        advancingEvents: 0,
+        jumpEvents: 0,
+        skippedIntermediateCounts: 0,
+        highestObservedCount: 0,
+        authoritativeFinalCount: null
+      };
 
       if (delivery === "realtime") {
         let resolveEvent;
@@ -557,12 +571,22 @@ async function runPopulation(playerCount, runNumber) {
           onHostEvent() {},
           onAnswerCounterEvent(row) {
             if (Number(row.question_index) !== questionNumber) return;
+            diagnostic.rawMatchingEvents++;
             const bucket = Number(row.bucket); const count = Number(row.answer_count);
-            if (!Number.isInteger(bucket) || !Number.isInteger(count) || count < 1) return;
-            bucketCounts.set(bucket, Math.max(bucketCounts.get(bucket) ?? 0, count));
+            if (!Number.isInteger(bucket) || !Number.isInteger(count) || count < 1) { diagnostic.invalidEvents++; return; }
+            const previousBucketCount = bucketCounts.get(bucket) ?? 0;
+            if (count <= previousBucketCount) { diagnostic.staleOrDuplicateEvents++; return; }
+            bucketCounts.set(bucket, count);
             const total = [...bucketCounts.values()].reduce((sum, value) => sum + value, 0);
-            if (total <= highestAnswerCount) return;
+            if (total <= highestAnswerCount) { diagnostic.staleOrDuplicateEvents++; return; }
+            const advance = total - highestAnswerCount;
+            if (advance > 1) {
+              diagnostic.jumpEvents++;
+              diagnostic.skippedIntermediateCounts += advance - 1;
+            }
             highestAnswerCount = total;
+            diagnostic.highestObservedCount = total;
+            diagnostic.advancingEvents++;
             const eventAt = performance.now();
             counterSample.realtimeAfterClick.push(eventAt - clickAt);
             counterSample.stateReadyAfterClick.push(eventAt - clickAt);
@@ -587,14 +611,36 @@ async function runPopulation(playerCount, runNumber) {
         counterSample.followupHydration.push(readyAt - hydrateStartedAt);
         counterSample.stateReadyAfterClick.push(readyAt - clickAt);
       } else {
+        let deliveryError = null;
         try {
           await waitWithTimeout(waitForFinalCounter, () =>
             `answer counter Realtime delivery timed out ` +
             `(observed ${highestAnswerCount}/${playerCount}; host counter events=${realtimeMessages.hostAnswerCounters}; ` +
             `host room events=${realtimeMessages.hostRoom}; player room events=${realtimeMessages.playerRoom})`
           );
+        } catch (error) {
+          deliveryError = error;
         } finally {
           activeTracker = null;
+        }
+        const authoritative = await hostState();
+        diagnostic.authoritativeFinalCount = Number(authoritative.body.room.answerCount);
+        answerCounterDiagnostics.push(diagnostic);
+        if (diagnostic.authoritativeFinalCount !== playerCount) {
+          throw new Error(
+            `Authoritative answer count did not reach the full population ` +
+            `(question=${questionNumber}; authoritative=${diagnostic.authoritativeFinalCount}/${playerCount}; ` +
+            `observed=${diagnostic.highestObservedCount}/${playerCount})`
+          );
+        }
+        if (deliveryError) {
+          throw new Error(
+            `${deliveryError.message}; authoritative=${diagnostic.authoritativeFinalCount}/${playerCount}; ` +
+            `raw matching events=${diagnostic.rawMatchingEvents}; advancing events=${diagnostic.advancingEvents}; ` +
+            `jump events=${diagnostic.jumpEvents}; skipped intermediate counts=${diagnostic.skippedIntermediateCounts}; ` +
+            `stale or duplicate events=${diagnostic.staleOrDuplicateEvents}`,
+            { cause: deliveryError }
+          );
         }
       }
     }
@@ -613,7 +659,7 @@ async function runPopulation(playerCount, runNumber) {
     finalStateResults.forEach(result => recordHttp(metrics.finalStandings, result));
     if (finalStateResults.some(result => result.body.room.status !== "finished")) throw new Error("Final standings were not authoritative for every client");
     await hostAction("end");
-    return { metrics, realtimeMessages, realtimeStartup };
+    return { metrics, realtimeMessages, realtimeStartup, presenceDiagnostics, answerCounterDiagnostics };
   } finally {
     activeTracker = null;
     await Promise.allSettled(channels.map(([client, channel]) => client.removeChannel(channel)));
@@ -630,17 +676,23 @@ for (const playerCount of playerCounts) {
   const aggregate = {};
   const realtimeStartup = [];
   const messages = { hostRoom: 0, hostAnswerCounters: 0, playerRoom: 0, hostPlayerRows: 0, playerPlayerRows: 0, presenceSyncs: 0 };
+  const presenceDiagnostics = { hostSyncs: 0, playerSyncs: 0, successfulTrackCalls: 0 };
+  const answerCounterDiagnostics = [];
   for (let run = 1; run <= runCount; run++) {
     console.error(`Benchmarking ${playerCount} players, run ${run}/${runCount}...`);
     const result = await runPopulation(playerCount, run);
     mergeMetrics(aggregate, result.metrics);
     if (result.realtimeStartup) realtimeStartup.push(result.realtimeStartup);
     for (const [kind, count] of Object.entries(result.realtimeMessages)) messages[kind] += count;
+    for (const [kind, count] of Object.entries(result.presenceDiagnostics)) presenceDiagnostics[kind] += count;
+    answerCounterDiagnostics.push(...result.answerCounterDiagnostics);
   }
   results[playerCount] = {
     metrics: Object.fromEntries(Object.entries(aggregate).map(([operation, metrics]) => [operation, summarizeMetrics(metrics)])),
     realtimeStartup,
-    realtimeMessages: { ...messages, total: Object.values(messages).reduce((sum, count) => sum + count, 0) }
+    realtimeMessages: { ...messages, total: Object.values(messages).reduce((sum, count) => sum + count, 0) },
+    presenceDiagnostics,
+    answerCounterDiagnostics
   };
 }
 
