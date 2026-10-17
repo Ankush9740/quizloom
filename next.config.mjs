@@ -13,6 +13,7 @@ const localDevelopmentOrigins = process.env.NODE_ENV === "development"
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   poweredByHeader: false,
+  devIndicators: false,
   // Development-only allowlist for testing from phones as the laptop changes networks.
   ...(localDevelopmentOrigins ? { allowedDevOrigins: localDevelopmentOrigins } : {})
 };
