@@ -5,7 +5,7 @@ import Link from "next/link";
 import { ArrowLeft, ArrowRight, CheckCircle2 } from "lucide-react";
 import { AvatarBuilder } from "@/components/avatar-builder";
 import { Logo } from "@/components/logo";
-import { defaultAvatar } from "@/lib/avatar-defaults";
+import { avatarPresets } from "@/lib/avatar-defaults";
 import { readJsonResponse } from "@/lib/client/http";
 import type { AvatarConfig } from "@/lib/types";
 import { startClientTrace } from "@/lib/client/performance";
@@ -19,7 +19,7 @@ function usefulJoinError(error: unknown) {
 }
 
 export function JoinFlow() {
-  const params = useSearchParams(); const router = useRouter(); const [code, setCode] = useState(params.get("code")?.replace(/\D/g, "").slice(0, 6) ?? ""); const [room, setRoom] = useState<RoomLookup | null>(null); const [nickname, setNickname] = useState(""); const [avatar, setAvatar] = useState<AvatarConfig>(defaultAvatar); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  const params = useSearchParams(); const router = useRouter(); const [code, setCode] = useState(params.get("code")?.replace(/\D/g, "").slice(0, 6) ?? ""); const [room, setRoom] = useState<RoomLookup | null>(null); const [nickname, setNickname] = useState(""); const [avatar, setAvatar] = useState<AvatarConfig>(() => ({ ...avatarPresets[0].config })); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
   const validate = useCallback(async () => { setBusy(true); setError(""); try { const r = await fetch(`/api/rooms/${code}`, { headers: { Accept: "application/json" } }); setRoom(await readJsonResponse<RoomLookup>(r)); } catch(e) { setError(usefulJoinError(e)); } finally { setBusy(false); } }, [code]);
   useEffect(() => { if (code.length === 6) void validate(); }, [code.length, validate]);
   async function join() { setBusy(true); setError(""); try { const storageKey = `quizloom:player:${code}`; let saved: { playerId?: string; playerToken?: string } | null = null; try { saved = JSON.parse(localStorage.getItem(storageKey) ?? "null"); } catch { localStorage.removeItem(storageKey); } const trace = startClientTrace("player.join"); const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "application/json", ...trace.header }; if (saved?.playerToken) headers["x-player-token"] = saved.playerToken; const r = await fetch("/api/players/join", { method: "POST", headers, body: JSON.stringify({ code, nickname, avatar, ...(saved?.playerId ? { playerId: saved.playerId } : {}) }) }); trace.finish(r); const j = await readJsonResponse<JoinResult>(r); localStorage.setItem(storageKey, JSON.stringify({ playerId: j.playerId, playerToken: j.playerToken, nickname: j.nickname })); router.push(`/play/${code}`); } catch(e) { setError(usefulJoinError(e)); setBusy(false); } }

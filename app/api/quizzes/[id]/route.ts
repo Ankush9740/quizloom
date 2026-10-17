@@ -5,7 +5,7 @@ import { apiError, assertDatabaseResult } from "@/lib/server/http";
 import { canAccessQuiz, quizDocumentFromRows } from "@/lib/server/quiz-access";
 import { createRoomForQuiz } from "@/lib/server/rooms";
 import { portableQuizSchema } from "@/lib/validation";
-import { insertQuestions } from "@/app/api/quizzes/route";
+import { insertQuestions } from "@/lib/server/quiz-write";
 import { startServerTrace } from "@/lib/server/performance";
 
 const idSchema = z.string().uuid();

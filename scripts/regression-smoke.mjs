@@ -67,10 +67,16 @@ try {
   const publicState = targetRoom => request(`/api/rooms/${targetRoom.code}/state`, { headers: { "Accept": "application/json" } }, 200).then(result => result.body);
   const submit = (targetRoom, player, optionId, expectedStatus = 200) => request("/api/answers", { method: "POST", headers: playerHeaders(player), body: JSON.stringify({ code: targetRoom.code, playerId: player.playerId, optionId }) }, expectedStatus);
 
+  const lobbyBeforeReconnect = await stateFor(room, playerOne);
+  const initialAvatar = lobbyBeforeReconnect.players.find(player => player.id === playerOne.playerId)?.avatar;
+  const customBackdrops = lobbyBeforeReconnect.players.filter(player => player.avatar.character === "custom").map(player => player.avatar.accent);
+  const robotBackdrops = lobbyBeforeReconnect.players.filter(player => player.avatar.character === "robot").map(player => player.avatar.accent);
+  if (new Set(customBackdrops).size !== customBackdrops.length || new Set(robotBackdrops).size !== robotBackdrops.length) throw new Error("Concurrent duplicate-character joins did not receive unique room-local backdrops");
   const reconnect = (await request("/api/players/join", { method: "POST", headers: playerHeaders(playerOne), body: JSON.stringify({ code: room.code, nickname: playerOne.nickname, avatar: avatarOne, playerId: playerOne.playerId }) }, 200)).body;
   if (!reconnect.reconnected || reconnect.playerId !== playerOne.playerId) throw new Error("A valid saved player session created a duplicate instead of reconnecting");
   const lobbyAfterReconnect = await stateFor(room, playerOne);
   if (lobbyAfterReconnect.players.length !== 20) throw new Error("Reconnect changed the lobby player count");
+  if (lobbyAfterReconnect.players.find(player => player.id === playerOne.playerId)?.avatar.accent !== initialAvatar?.accent) throw new Error("Reconnect changed the authoritative avatar backdrop");
 
   await hostAction(room, "start");
   let state = await stateFor(room, playerOne);
@@ -79,6 +85,14 @@ try {
   const firstStartedAt = new Date(state.room.questionStartedAt).getTime();
   const firstDeadline = new Date(state.room.questionEndsAt).getTime();
   if (firstDeadline - firstStartedAt !== 60_000) throw new Error("The first question did not receive one authoritative 60-second deadline");
+  const unauthenticated = await publicState(room);
+  if (unauthenticated.question) throw new Error("Public room state exposed question content without a room session");
+  await request(`/api/rooms/${room.code}/transition?question=0`, { headers: { "Accept": "application/json" } }, 403);
+  await request(`/api/rooms/${room.code}/transition?question=0&playerId=${playerOne.playerId}`, { headers: { "Accept": "application/json", "x-player-token": playerOne.playerToken } }, 200);
+  if (Date.now() < firstStartedAt) {
+    const earlyAnswer = await submit(room, playerOne, state.question.options[0].id, 400);
+    if (!String(earlyAnswer.body.error).includes("not started")) throw new Error("The server did not reject a pre-start answer");
+  }
   const [hostClockSample, playerClockSample] = await Promise.all([
     sampledState(`/api/rooms/${room.code}/state`, { "Accept": "application/json", "x-host-token": room.hostToken }),
     sampledState(`/api/rooms/${room.code}/state?playerId=${playerOne.playerId}`, playerHeaders(playerOne), 18_000)
@@ -97,7 +111,8 @@ try {
   timings.concurrentSubmitMs = Math.round(performance.now() - submitStarted);
   await submit(room, playerOne, state.question.options[0].id, 400);
   state = await stateFor(room, playerOne);
-  if (state.room.answerCount !== 19) throw new Error("Answer counter did not reach 19/20");
+  const hostCounterAfterBatch = await hostState(room);
+  if (hostCounterAfterBatch.room.answerCount !== 19) throw new Error(`Host answer counter reached ${hostCounterAfterBatch.room.answerCount}/20 instead of 19/20`);
   if (state.players.some(player => player.score !== 0)) throw new Error("A score changed before reveal");
   if ((await publicState(room)).players.some(player => player.score !== 0 || player.correctAnswers !== 0 || player.streak !== 0)) throw new Error("Public room state exposed standings before completion");
 
@@ -121,7 +136,8 @@ try {
   await waitForQuestionStart(state);
   await submit(room, playerOne, finalOptionId);
   state = await stateFor(room, playerOne);
-  if (state.room.answerCount !== 1) throw new Error("Second-question answer counter failed");
+  const hostCounterAfterSecondAnswer = await hostState(room);
+  if (hostCounterAfterSecondAnswer.room.answerCount !== 1) throw new Error(`Second-question host answer counter reached ${hostCounterAfterSecondAnswer.room.answerCount}/20 instead of 1/20`);
   await hostAction(room, "reveal");
   const secondCorrect = await stateFor(room, playerOne);
   const unanswered = await stateFor(room, playerTwo);
@@ -180,7 +196,7 @@ try {
   if (legacyExport.pointsPerCorrectAnswer !== 1) throw new Error("Legacy JSON default failed");
   await request(`/api/quizzes/${legacy.quizId}`, { method: "DELETE", headers: legacyHeaders }, 200);
 
-  console.log(`Regression smoke test passed: ${timings.timerDifferenceMs}ms calibrated host/player timer difference with an 18s simulated client skew, shared 60-second deadlines, fresh next-question deadline, server-rejected late answer, 20-player room, ${timings.concurrentSubmitMs}ms concurrent submit batch, ${timings.revealMs}ms reveal, idempotent player reconnect, rejected old-code join, private in-quiz rankings, host standings, library, create, edit, isolated rehosting, idempotent room ending, blocked post-end answers, legacy/themed avatar persistence, fixed scoring, answer counter, reveal feedback, final results, legacy JSON, and deletion.`);
+  console.log(`Regression smoke test passed: ${timings.timerDifferenceMs}ms calibrated host/player timer difference with an 18s simulated client skew, authenticated question hydration, hidden public questions, shared 60-second deadlines, fresh next-question deadline, server-rejected early/late answers, 20-player concurrent duplicate-avatar assignment, ${timings.concurrentSubmitMs}ms concurrent submit batch, ${timings.revealMs}ms reveal, avatar-preserving reconnect, rejected old-code join, private in-quiz rankings, host standings, library, create, edit, isolated rehosting, idempotent room ending, blocked post-end answers, legacy/themed avatar persistence, fixed scoring, answer counter, reveal feedback, final results, legacy JSON, and deletion.`);
 } finally {
   if (quiz) {
     try {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAdminClient } from "@/lib/supabase/server";
 import { apiError } from "@/lib/server/http";
+import { hashToken } from "@/lib/server/session";
 import { roomCodeSchema } from "@/lib/validation";
 import { startServerTrace } from "@/lib/server/performance";
 
@@ -42,6 +43,20 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     if (!Number.isInteger(expectedQuestion) || expectedQuestion < 0) {
       return trace.response(NextResponse.json({ error: "Question number is not valid" }, { status: 400 }));
     }
+    const playerIdValue = new URL(request.url).searchParams.get("playerId");
+    const playerId = playerIdValue && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(playerIdValue) ? playerIdValue : null;
+    const hostToken = request.headers.get("x-host-token");
+    const playerToken = request.headers.get("x-player-token");
+    const db = getAdminClient();
+    const { data: authorized, error: authorizationError } = await db.rpc("authorize_quiz_room_session", {
+      p_room_code: code,
+      p_host_token_hash: hostToken ? hashToken(hostToken) : null,
+      p_player_id: playerId,
+      p_player_token_hash: playerToken ? hashToken(playerToken) : null
+    });
+    if (authorizationError) throw authorizationError;
+    trace.mark("authorize-session");
+    if (!authorized) return trace.response(NextResponse.json({ error: "Room access is no longer valid" }, { status: 403 }));
     const transition = await loadTransition(code, expectedQuestion);
     trace.mark("transition-rpc");
     if (transition.kind === "missing") return trace.response(NextResponse.json({ error: "Room not found" }, { status: 404 }));

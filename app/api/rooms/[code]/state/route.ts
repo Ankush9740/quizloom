@@ -86,7 +86,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ code
     }
 
     const current = questionResult.data;
-    if (current) {
+    // Room codes are intentionally easy to share. They are not credentials:
+    // only an authenticated host/player session receives question content.
+    if (current && (hostAuthenticated || playerAuthenticated)) {
       const options = [...(current.question_options ?? [])].sort((a, b) => a.position - b.position);
       response.question = {
         id: current.id,

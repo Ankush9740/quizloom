@@ -34,5 +34,13 @@ export const avatarPresets: { name: string; config: AvatarConfig }[] = [
   { name: "Oona Alien", config: { base: "round", skin: "#8ED1C5", eyes: "dot", head: "none", accessory: "none", accent: "#7C4DFF", character: "alien" } },
   { name: "Gumbo Monster", config: { base: "bean", skin: "#D1A6FF", eyes: "happy", head: "none", accessory: "none", accent: "#20B486", character: "monster" } },
   { name: "Ember Dragon", config: { base: "bean", skin: "#62B86B", eyes: "wink", head: "none", accessory: "none", accent: "#FF6846", character: "dragon" } },
-  { name: "Bolt Superhero", config: { base: "round", skin: "#C9825B", eyes: "dot", head: "none", accessory: "none", accent: "#D83A78", character: "superhero" } }
+  { name: "Bolt Superhero", config: { base: "round", skin: "#C9825B", eyes: "dot", head: "none", accessory: "none", accent: "#D83A78", character: "superhero" } },
+  { name: "Bandit Raccoon", config: { base: "round", skin: "#9AA7B8", eyes: "dot", head: "none", accessory: "none", accent: "#16866A", character: "raccoon" } },
+  { name: "Ripple Otter", config: { base: "bean", skin: "#A96F4F", eyes: "happy", head: "none", accessory: "none", accent: "#196C8C", character: "otter" } },
+  { name: "Bubbles Axolotl", config: { base: "round", skin: "#F78DA7", eyes: "happy", head: "none", accessory: "none", accent: "#3155E7", character: "axolotl" } },
+  { name: "Buzz Bee", config: { base: "round", skin: "#F6C453", eyes: "wink", head: "none", accessory: "none", accent: "#6842C2", character: "bee" } },
+  { name: "Flare Phoenix", config: { base: "bean", skin: "#FF6846", eyes: "happy", head: "none", accessory: "stars", accent: "#A8326D", character: "phoenix" } },
+  { name: "Nova Unicorn", config: { base: "round", skin: "#FFFDF7", eyes: "happy", head: "none", accessory: "stars", accent: "#7C3AED", character: "unicorn" } },
+  { name: "Skye Griffin", config: { base: "round", skin: "#D9A65F", eyes: "dot", head: "none", accessory: "none", accent: "#0369A1", character: "griffin" } },
+  { name: "Byte Android", config: { base: "bot", skin: "#8ED1C5", eyes: "dot", head: "none", accessory: "none", accent: "#475569", character: "android" } }
 ];

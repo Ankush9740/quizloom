@@ -150,7 +150,11 @@ export function useRoom(code: string, session: Session = null, hostToken: string
           const clientSentWallMs = Date.now();
           try {
             const trace = startClientTrace("question.hydrate");
-            const response = await fetch(`/api/rooms/${code}/transition?question=${expectedQuestion}`, { cache: "no-store", headers: trace.header });
+            const transitionHeaders: Record<string, string> = { ...trace.header };
+            if (playerToken) transitionHeaders["x-player-token"] = playerToken;
+            else if (hostToken) transitionHeaders["x-host-token"] = hostToken;
+            const playerQuery = playerId ? `&playerId=${encodeURIComponent(playerId)}` : "";
+            const response = await fetch(`/api/rooms/${code}/transition?question=${expectedQuestion}${playerQuery}`, { cache: "no-store", headers: transitionHeaders });
             trace.finish(response);
             const transition = await response.json() as RoomTransition & { error?: string };
             const clientReceivedWallMs = Date.now(); const clientReceivedMonotonicMs = performance.now();
@@ -226,7 +230,7 @@ export function useRoom(code: string, session: Session = null, hostToken: string
         if (isSubscribed) void refresh();
       });
     return () => { if (frame !== null) window.cancelAnimationFrame(frame); void db.removeChannel(channel); };
-  }, [state?.room.id, code, playerId, applyReveal, applyRoomTransition, refresh]);
+  }, [state?.room.id, code, hostToken, playerId, playerToken, applyReveal, applyRoomTransition, refresh]);
   return { state, error, connected, clock, refresh, applyHostReveal, applyRoomTransition, markAnswered };
 }
 

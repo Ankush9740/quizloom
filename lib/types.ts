@@ -3,7 +3,8 @@ export type AvatarCharacter =
   | "cat" | "dog" | "panda" | "fox" | "frog" | "bear" | "rabbit" | "tiger"
   | "lion" | "elephant" | "penguin" | "owl" | "wolf" | "koala" | "red-panda" | "shark" | "dinosaur"
   | "cartoon-kid" | "hero" | "geek" | "ninja" | "pirate" | "explorer"
-  | "astronaut" | "wizard" | "knight" | "robot" | "alien" | "monster" | "dragon" | "superhero";
+  | "astronaut" | "wizard" | "knight" | "robot" | "alien" | "monster" | "dragon" | "superhero"
+  | "raccoon" | "otter" | "axolotl" | "bee" | "phoenix" | "unicorn" | "griffin" | "android";
 
 export type AvatarConfig = {
   base: "round" | "bean" | "bot";

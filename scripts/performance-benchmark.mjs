@@ -408,7 +408,7 @@ async function runPopulation(playerCount, runNumber) {
           const hydrateStartedAt = performance.now();
           let hydrated;
           if (followup === "state" && (mode === "legacy" || kind === "finish")) hydrated = await stateFor(player);
-          else if (followup === "state") hydrated = await request(`/api/rooms/${room.code}/transition?question=${Number(actionResult.body.transition?.room?.currentQuestion)}`);
+          else if (followup === "state") hydrated = await request(`/api/rooms/${room.code}/transition?question=${Number(actionResult.body.transition?.room?.currentQuestion)}&playerId=${player.playerId}`, { headers: { "x-player-token": player.playerToken } });
           if (followup === "reveal") hydrated = await revealFor(player);
           const readyAt = performance.now();
           sample.followupHydration.push(readyAt - hydrateStartedAt);
@@ -473,7 +473,7 @@ async function runPopulation(playerCount, runNumber) {
             const hydrateStartedAt = performance.now();
             let hydratedResponse;
             if (followup === "state" && (mode === "legacy" || kind === "finish")) hydratedResponse = await stateFor(players[index]);
-            else if (followup === "state") hydratedResponse = await request(`/api/rooms/${room.code}/transition?question=${Number(row.current_question)}`);
+            else if (followup === "state") hydratedResponse = await request(`/api/rooms/${room.code}/transition?question=${Number(row.current_question)}&playerId=${players[index].playerId}`, { headers: { "x-player-token": players[index].playerToken } });
             if (followup === "reveal") hydratedResponse = await revealFor(players[index]);
             const readyAt = performance.now();
             sample.followupHydration.push(readyAt - hydrateStartedAt);

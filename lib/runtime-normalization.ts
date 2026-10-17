@@ -9,7 +9,8 @@ const characters = new Set<AvatarCharacter>([
   "custom", "cat", "dog", "panda", "fox", "frog", "bear", "rabbit", "tiger",
   "lion", "elephant", "penguin", "owl", "wolf", "koala", "red-panda", "shark", "dinosaur",
   "cartoon-kid", "hero", "geek", "ninja", "pirate", "explorer", "wizard",
-  "astronaut", "knight", "robot", "alien", "monster", "dragon", "superhero"
+  "astronaut", "knight", "robot", "alien", "monster", "dragon", "superhero",
+  "raccoon", "otter", "axolotl", "bee", "phoenix", "unicorn", "griffin", "android"
 ]);
 const colorPattern = /^#[0-9a-f]{6}$/i;
 
