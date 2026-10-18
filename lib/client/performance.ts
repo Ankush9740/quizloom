@@ -3,6 +3,10 @@ type ClientTrace = {
   finish(response: Response): void;
 };
 
+type ClientTimer = {
+  finish(operation: string, detail?: Record<string, unknown>): void;
+};
+
 function newTraceId() {
   return typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
@@ -37,6 +41,17 @@ export function startClientTrace(operation: string): ClientTrace {
           serverTiming
         });
       }
+    }
+  };
+}
+
+/** Starts a client-only measurement without coupling it to an HTTP response. */
+export function startClientTimer(): ClientTimer {
+  const startedAt = performance.now();
+
+  return {
+    finish(operation, detail) {
+      recordClientDuration(operation, performance.now() - startedAt, detail);
     }
   };
 }
