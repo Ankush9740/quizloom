@@ -15,7 +15,7 @@ assert.match(migration, /revoke all on function public\.join_quiz_room[\s\S]*fro
 assert.match(migration, /:avatar:' \|\| v_character/, "simultaneous duplicate-character joins need a character-scoped lock");
 assert.ok(migration.indexOf("'kind', 'reconnected'") < migration.indexOf(":avatar:"), "reconnects must preserve the previously assigned avatar");
 assert.match(migration, /where not exists[\s\S]*avatar_config ->> 'accent'/i, "assignment must prefer an unused character/backdrop combination");
-assert.match(transitionRoute, /authorize_quiz_room_session/);
+assert.match(transitionRoute, /get_authorized_quiz_room_transition/, "the transition route must preserve session-gated hydration through the newer merged RPC");
 assert.match(transitionRoute, /x-host-token/);
 assert.match(transitionRoute, /x-player-token/);
 assert.match(stateRoute, /current && \(hostAuthenticated \|\| playerAuthenticated\)/, "public state must not include question content");

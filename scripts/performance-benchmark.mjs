@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { observeScheduledStart } from "./lib/benchmark-clock.mjs";
 import { loadStagingEnvironment } from "./lib/staging-environment.mjs";
 import { classifyRealtimeSystemError, runInBatches, waitForRealtimeSubscription } from "./lib/realtime-startup.mjs";
 
@@ -14,6 +15,7 @@ const realtimeConnectBatchSize = Number(argv.find(argument => argument.startsWit
 const realtimeConnectStaggerMs = Number(argv.find(argument => argument.startsWith("--realtime-connect-stagger-ms="))?.split("=")[1] ?? 300);
 const realtimePresenceBatchSize = Number(argv.find(argument => argument.startsWith("--realtime-presence-batch-size="))?.split("=")[1] ?? 1);
 const realtimePresenceStaggerMs = Number(argv.find(argument => argument.startsWith("--realtime-presence-stagger-ms="))?.split("=")[1] ?? 1_100);
+const transitionProfile = argv.find(argument => argument.startsWith("--transition-profile="))?.split("=")[1] ?? "uncontrolled";
 
 if (!["legacy", "optimized"].includes(mode)) throw new Error("--mode must be legacy or optimized");
 if (!["realtime", "direct"].includes(delivery)) throw new Error("--delivery must be realtime or direct");
@@ -24,6 +26,7 @@ if (!Number.isInteger(realtimeConnectBatchSize) || realtimeConnectBatchSize < 1 
 if (!Number.isInteger(realtimeConnectStaggerMs) || realtimeConnectStaggerMs < 0 || realtimeConnectStaggerMs > 5_000) throw new Error("--realtime-connect-stagger-ms must be an integer from 0 through 5000");
 if (!Number.isInteger(realtimePresenceBatchSize) || realtimePresenceBatchSize < 1 || realtimePresenceBatchSize > 10) throw new Error("--realtime-presence-batch-size must be an integer from 1 through 10");
 if (!Number.isInteger(realtimePresenceStaggerMs) || realtimePresenceStaggerMs < 0 || realtimePresenceStaggerMs > 5_000) throw new Error("--realtime-presence-stagger-ms must be an integer from 0 through 5000");
+if (!["uncontrolled", "cold", "warm"].includes(transitionProfile)) throw new Error("--transition-profile must be uncontrolled, cold, or warm");
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -63,18 +66,34 @@ function requestKey(path, options) {
 async function request(path, options = {}, expectedStatus) {
   const key = requestKey(path, options);
   networkRequestCounts.set(key, (networkRequestCounts.get(key) ?? 0) + 1);
+  const clientSentWallMs = Date.now();
   const startedAt = performance.now();
   const response = await fetch(`${baseUrl}${path}`, options);
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) throw new Error(`${path} returned ${contentType || "no content type"}`);
   const body = await response.json();
+  const clientReceivedWallMs = Date.now();
+  const clientReceivedMonotonicMs = performance.now();
   const elapsedMs = performance.now() - startedAt;
   const vercelId = response.headers.get("x-vercel-id");
   if (vercelId) observedVercelRegions.add(vercelId.split("::")[0]);
   if (expectedStatus !== undefined ? response.status !== expectedStatus : !response.ok) {
     throw new Error(`${path} returned ${response.status}: ${body.error ?? "request failed"}`);
   }
-  return { body, elapsedMs, serverTiming: parseServerTiming(response.headers.get("server-timing") ?? "") };
+  const databaseCallsHeader = response.headers.get("x-quizloom-database-calls");
+  const databaseCalls = Number(databaseCallsHeader);
+  return {
+    body,
+    elapsedMs,
+    clientSentWallMs,
+    clientReceivedWallMs,
+    clientReceivedMonotonicMs,
+    serverTiming: parseServerTiming(response.headers.get("server-timing") ?? ""),
+    transitionDiagnostics: {
+      coalescer: response.headers.get("x-quizloom-transition-coalescer"),
+      databaseCalls: databaseCallsHeader !== null && Number.isInteger(databaseCalls) && databaseCalls >= 0 ? databaseCalls : null
+    }
+  };
 }
 
 async function verifyStagingApplication() {
@@ -96,7 +115,10 @@ function summarize(values) {
   const result = {
     samples: values.length,
     averageMs: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length * 10) / 10,
-    p50Ms: Math.round(percentile(sorted, 0.5) * 10) / 10
+    minimumMs: Math.round(sorted[0] * 10) / 10,
+    p05Ms: Math.round(percentile(sorted, 0.05) * 10) / 10,
+    p50Ms: Math.round(percentile(sorted, 0.5) * 10) / 10,
+    maximumMs: Math.round(sorted.at(-1) * 10) / 10
   };
   if (values.length >= 20) result.p95Ms = Math.round(percentile(sorted, 0.95) * 10) / 10;
   if (values.length >= 100) result.p99Ms = Math.round(percentile(sorted, 0.99) * 10) / 10;
@@ -107,7 +129,10 @@ function makeMetrics() {
   return {
     actionHttp: [], serverTotal: [], networkAndClientOverhead: [], followupServerTotal: [], followupNetworkAndClientOverhead: [], realtimeAfterClick: [], realtimeAfterResponse: [],
     databaseToSubscriberApprox: [], followupHydration: [], stateReadyAfterClick: [], scheduledStartHeadroom: [],
-    authoritativeDuration: [], serverStages: {}
+    clockOffsetUncertainty: [], requestArrivalApprox: [], responseReturnApprox: [],
+    authoritativeDuration: [], serverStages: {},
+    headroomClassification: { confirmedReady: 0, confirmedLate: 0, uncertain: 0, unmeasured: 0 },
+    transitionDiagnostics: { coalescerHits: 0, coalescerMisses: 0, coalescerBypasses: 0, databaseCalls: 0 }
   };
 }
 
@@ -121,6 +146,11 @@ function recordFollowupHttp(sample, result) {
     if (stage === "total") continue;
     (sample.serverStages[`followup-${stage}`] ??= []).push(duration);
   }
+  const coalescer = result.transitionDiagnostics.coalescer;
+  if (coalescer === "hit") sample.transitionDiagnostics.coalescerHits++;
+  else if (coalescer === "miss") sample.transitionDiagnostics.coalescerMisses++;
+  else if (coalescer === "disabled" || coalescer === "bypass") sample.transitionDiagnostics.coalescerBypasses++;
+  if (result.transitionDiagnostics.databaseCalls !== null) sample.transitionDiagnostics.databaseCalls += result.transitionDiagnostics.databaseCalls;
 }
 
 function recordHttp(sample, result) {
@@ -146,6 +176,7 @@ function summarizeMetrics(metrics) {
   const result = {};
   for (const [key, values] of Object.entries(metrics)) {
     if (key === "serverStages") result.serverStages = Object.fromEntries(Object.entries(values).map(([stage, durations]) => [stage, summarize(durations)]));
+    else if (key === "headroomClassification" || key === "transitionDiagnostics") result[key] = { ...values };
     else result[key] = summarize(values);
   }
   return result;
@@ -157,9 +188,22 @@ function mergeMetrics(target, source) {
     for (const [key, values] of Object.entries(metrics)) {
       if (key === "serverStages") {
         for (const [stage, durations] of Object.entries(values)) (destination.serverStages[stage] ??= []).push(...durations);
+      } else if (key === "headroomClassification" || key === "transitionDiagnostics") {
+        for (const [name, count] of Object.entries(values)) destination[key][name] += count;
       } else destination[key].push(...values);
     }
   }
+}
+
+function recordScheduledStart(sample, result) {
+  const observation = observeScheduledStart(result);
+  if (!observation) { sample.headroomClassification.unmeasured++; return; }
+  sample.scheduledStartHeadroom.push(observation.headroomMs);
+  sample.clockOffsetUncertainty.push(observation.uncertaintyMs);
+  sample.requestArrivalApprox.push(observation.requestArrivalMs);
+  sample.responseReturnApprox.push(observation.responseReturnMs);
+  sample.headroomClassification[observation.classification]++;
+  if (observation.authoritativeDurationMs !== null) sample.authoritativeDuration.push(observation.authoritativeDurationMs);
 }
 
 async function cleanupBenchmarkData(quiz, room) {
@@ -415,8 +459,7 @@ async function runPopulation(playerCount, runNumber) {
           sample.stateReadyAfterClick.push(readyAt - clickAt);
           if (hydrated) recordFollowupHttp(sample, hydrated);
           if ((kind === "start" || kind === "next") && hydrated?.body?.room?.questionStartedAt) {
-            sample.scheduledStartHeadroom.push(new Date(hydrated.body.room.questionStartedAt).getTime() - Date.now());
-            sample.authoritativeDuration.push(new Date(hydrated.body.room.questionEndsAt).getTime() - new Date(hydrated.body.room.questionStartedAt).getTime());
+            recordScheduledStart(sample, hydrated);
           }
         }));
         return actionResult.body;
@@ -480,8 +523,7 @@ async function runPopulation(playerCount, runNumber) {
             sample.stateReadyAfterClick.push(readyAt - clickAt);
             if (hydratedResponse) recordFollowupHttp(sample, hydratedResponse);
             if ((kind === "start" || kind === "next") && hydratedResponse?.body?.room?.questionStartedAt) {
-              sample.scheduledStartHeadroom.push(new Date(hydratedResponse.body.room.questionStartedAt).getTime() - Date.now());
-              sample.authoritativeDuration.push(new Date(hydratedResponse.body.room.questionEndsAt).getTime() - new Date(hydratedResponse.body.room.questionStartedAt).getTime());
+              recordScheduledStart(sample, hydratedResponse);
             }
             hydratedCount++;
           })();
@@ -671,6 +713,15 @@ async function runPopulation(playerCount, runNumber) {
 }
 
 const targetIdentity = await verifyStagingApplication();
+let transitionWarmup = null;
+if (transitionProfile === "warm") {
+  const warmed = await request("/api/rooms/000000/transition?question=0", { cache: "no-store" }, 403);
+  transitionWarmup = {
+    elapsedMs: Number(warmed.elapsedMs.toFixed(1)),
+    serverTotalMs: Number.isFinite(warmed.serverTiming.total) ? warmed.serverTiming.total : null,
+    databaseCalls: warmed.transitionDiagnostics.databaseCalls
+  };
+}
 const results = {};
 for (const playerCount of playerCounts) {
   const aggregate = {};
@@ -678,6 +729,7 @@ for (const playerCount of playerCounts) {
   const messages = { hostRoom: 0, hostAnswerCounters: 0, playerRoom: 0, hostPlayerRows: 0, playerPlayerRows: 0, presenceSyncs: 0 };
   const presenceDiagnostics = { hostSyncs: 0, playerSyncs: 0, successfulTrackCalls: 0 };
   const answerCounterDiagnostics = [];
+  const transitionRuns = [];
   for (let run = 1; run <= runCount; run++) {
     console.error(`Benchmarking ${playerCount} players, run ${run}/${runCount}...`);
     const result = await runPopulation(playerCount, run);
@@ -686,13 +738,27 @@ for (const playerCount of playerCounts) {
     for (const [kind, count] of Object.entries(result.realtimeMessages)) messages[kind] += count;
     for (const [kind, count] of Object.entries(result.presenceDiagnostics)) presenceDiagnostics[kind] += count;
     answerCounterDiagnostics.push(...result.answerCounterDiagnostics);
+    const isFirstMeasuredTransition = playerCount === playerCounts[0] && run === 1;
+    transitionRuns.push({
+      run,
+      profile: transitionProfile === "uncontrolled"
+        ? "uncontrolled"
+        : transitionProfile === "warm"
+          ? "warm"
+          : isFirstMeasuredTransition
+            ? "cold-candidate"
+            : "warm-after-first-use",
+      firstQuestion: summarizeMetrics(result.metrics.start),
+      subsequentQuestions: summarizeMetrics(result.metrics.next)
+    });
   }
   results[playerCount] = {
     metrics: Object.fromEntries(Object.entries(aggregate).map(([operation, metrics]) => [operation, summarizeMetrics(metrics)])),
     realtimeStartup,
     realtimeMessages: { ...messages, total: Object.values(messages).reduce((sum, count) => sum + count, 0) },
     presenceDiagnostics,
-    answerCounterDiagnostics
+    answerCounterDiagnostics,
+    transitionRuns
   };
 }
 
@@ -702,6 +768,8 @@ console.log(JSON.stringify({
   playerCounts,
   questionCount,
   runCount,
+  transitionProfile,
+  transitionWarmup,
   realtimeConnectionPolicy: delivery === "realtime" ? {
     batchSize: realtimeConnectBatchSize,
     staggerMs: realtimeConnectStaggerMs,
@@ -709,7 +777,8 @@ console.log(JSON.stringify({
     presenceStaggerMs: realtimePresenceStaggerMs,
     rationale: "Bound channel joins and pace Presence fan-out separately; gameplay latency timing starts after both readiness phases."
   } : null,
-  percentilePolicy: "p50 for all non-empty samples; p95 at 20+ samples; p99 at 100+ samples",
+  percentilePolicy: "minimum, p05, p50, and maximum for all non-empty samples; p95 at 20+ samples; p99 at 100+ samples",
+  headroomPolicy: "Scheduled-start headroom uses the transition response's four-timestamp server-clock estimate. Confirmed late means headroom plus uncertainty is below zero; confirmed ready means headroom minus uncertainty is non-negative; remaining observations are uncertain.",
   environment: {
     kind: "isolated-staging",
     targetOrigin: new URL(baseUrl).origin,
