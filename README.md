@@ -30,7 +30,7 @@ Next.js App Router, TypeScript, Tailwind CSS, Supabase PostgreSQL, Supabase Real
    ```
 
 2. Create a Supabase project.
-3. Open the Supabase SQL Editor and run every file in `supabase/migrations/` in numeric order. Existing installations must apply new numbered migrations as they are added; fixed scoring and the live answer counter require `004_fixed_scoring_and_answer_counter.sql`.
+3. Open the Supabase SQL Editor and run every file in `supabase/migrations/` in numeric order, currently `001` through `011`. Existing installations must apply each missing migration in sequence. Do not stop after `010_authorized_transition_hydration.sql`: `011_fix_authorized_transition_hydration.sql` is its required PostgreSQL compatibility hotfix.
 4. Optionally run `supabase/seed.sql` to add the five-question **Campus Curiosity Cup** quiz. The builder also has a **Load demo quiz** button, which is the quickest end-to-end test.
 5. Copy `.env.example` to `.env.local` and fill in the values.
 6. Start the app:
@@ -68,8 +68,16 @@ Important areas:
 - `components/player-room.tsx` — mobile player lobby/game/results
 - `hooks/use-room.ts` — Realtime refresh and Presence tracking
 - `supabase/migrations/001_initial_schema.sql` — schema, indexes, RLS, grants, scoring function, and Realtime publication
+- `supabase/migrations/002_service_role_grants.sql` — explicit least-privilege table access for trusted server routes
 - `supabase/migrations/003_quiz_library_and_fast_reveal.sql` — reusable quiz access and secure lightweight reveal response
 - `supabase/migrations/004_fixed_scoring_and_answer_counter.sql` — fixed quiz scoring and aggregate live answer count
+- `supabase/migrations/005_concurrent_answers.sql` — concurrent answer submission and reveal locking
+- `supabase/migrations/006_speed_ranking_synchronized_start_and_custom_timers.sql` — deterministic speed ranking, scheduled starts, and 5–300 second timers
+- `supabase/migrations/007_backend_performance_optimization.sql` — atomic room/join paths and sharded answer counters
+- `supabase/migrations/008_player_presence_privacy.sql` — public presence projection without private scores or ranking data
+- `supabase/migrations/009_countdown_privacy_and_avatar_assignment.sql` — session-gated transition hydration and race-safe avatar backgrounds
+- `supabase/migrations/010_authorized_transition_hydration.sql` — combined session authorization and transition payload RPC
+- `supabase/migrations/011_fix_authorized_transition_hydration.sql` — required SQL compatibility correction for Migration 010
 
 ## Portable quiz JSON
 
@@ -105,6 +113,8 @@ npm run build
 To smoke-test manually: load the demo quiz, launch a room, join from two private windows, start, answer from both, reveal, continue through all five questions, and verify the podium. Refresh a player mid-game to verify reconnection.
 
 With the development server running, `node scripts/regression-smoke.mjs` creates disposable test data, checks the library/create/edit/host/join/answer/reveal/scoring/delete API flow, and removes its test quizzes afterward.
+
+Database-backed load tests require an isolated Supabase project and fail closed when staging identity cannot be verified. Follow [the performance staging guide](docs/performance-staging.md); never run the performance scripts with production credentials.
 
 ## Deploy to Vercel
 

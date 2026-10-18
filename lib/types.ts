@@ -3,7 +3,8 @@ export type AvatarCharacter =
   | "cat" | "dog" | "panda" | "fox" | "frog" | "bear" | "rabbit" | "tiger"
   | "lion" | "elephant" | "penguin" | "owl" | "wolf" | "koala" | "red-panda" | "shark" | "dinosaur"
   | "cartoon-kid" | "hero" | "geek" | "ninja" | "pirate" | "explorer"
-  | "astronaut" | "wizard" | "knight" | "robot" | "alien" | "monster" | "dragon" | "superhero";
+  | "astronaut" | "wizard" | "knight" | "robot" | "alien" | "monster" | "dragon" | "superhero"
+  | "raccoon" | "otter" | "axolotl" | "bee" | "phoenix" | "unicorn" | "griffin" | "android";
 
 export type AvatarConfig = {
   base: "round" | "bean" | "bot";
@@ -65,7 +66,7 @@ export type RoomTransition = {
 
 export type RoomState = {
   clock: { receivedAt: string; sentAt: string };
-  room: { id: string; code: string; title: string; status: "lobby" | "question" | "results" | "finished" | "ended"; currentQuestion: number; questionCount: number; questionStartedAt: string | null; questionEndsAt: string | null; answerCount: number };
+  room: { id: string; code: string; title: string; status: "lobby" | "question" | "results" | "finished" | "ended"; currentQuestion: number; questionCount: number; questionStartedAt: string | null; questionEndsAt: string | null; answerCount: number; answerBuckets?: { bucket: number; count: number }[]; legacyAnswerCount?: number };
   players: PlayerView[];
   question?: RoomQuestion;
   me?: PlayerView & { answered: boolean; lastPoints: number; selectedOptionId?: string; wasCorrect?: boolean };

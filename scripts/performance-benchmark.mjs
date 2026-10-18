@@ -1,64 +1,253 @@
-import { readFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
+import { observeScheduledStart } from "./lib/benchmark-clock.mjs";
+import { loadStagingEnvironment } from "./lib/staging-environment.mjs";
+import { classifyRealtimeSystemError, runInBatches, waitForRealtimeSubscription } from "./lib/realtime-startup.mjs";
 
-const baseUrl = process.env.QUIZLOOM_TEST_URL ?? "http://127.0.0.1:3000";
-const mode = process.argv.find(arg => arg.startsWith("--mode="))?.split("=")[1] ?? "legacy";
-const delivery = process.argv.find(arg => arg.startsWith("--delivery="))?.split("=")[1] ?? "realtime";
-const playerCounts = (process.argv.find(arg => arg.startsWith("--players="))?.split("=")[1] ?? "2,10,20").split(",").map(Number);
-const questionCount = Number(process.argv.find(arg => arg.startsWith("--questions="))?.split("=")[1] ?? 6);
-if (!['legacy', 'optimized'].includes(mode)) throw new Error("--mode must be legacy or optimized");
-if (!['realtime', 'direct'].includes(delivery)) throw new Error("--delivery must be realtime or direct");
+const argv = process.argv.slice(2);
+const staging = loadStagingEnvironment({ argv, requireWriteConfirmation: true });
+const baseUrl = staging.baseUrl;
+const mode = argv.find(argument => argument.startsWith("--mode="))?.split("=")[1] ?? "optimized";
+const delivery = argv.find(argument => argument.startsWith("--delivery="))?.split("=")[1] ?? "realtime";
+const playerCounts = (argv.find(argument => argument.startsWith("--players="))?.split("=")[1] ?? "2,10,20,50").split(",").map(Number);
+const questionCount = Number(argv.find(argument => argument.startsWith("--questions="))?.split("=")[1] ?? 6);
+const runCount = Number(argv.find(argument => argument.startsWith("--runs="))?.split("=")[1] ?? 3);
+const realtimeConnectBatchSize = Number(argv.find(argument => argument.startsWith("--realtime-connect-batch-size="))?.split("=")[1] ?? 4);
+const realtimeConnectStaggerMs = Number(argv.find(argument => argument.startsWith("--realtime-connect-stagger-ms="))?.split("=")[1] ?? 300);
+const realtimePresenceBatchSize = Number(argv.find(argument => argument.startsWith("--realtime-presence-batch-size="))?.split("=")[1] ?? 1);
+const realtimePresenceStaggerMs = Number(argv.find(argument => argument.startsWith("--realtime-presence-stagger-ms="))?.split("=")[1] ?? 1_100);
+const transitionProfile = argv.find(argument => argument.startsWith("--transition-profile="))?.split("=")[1] ?? "uncontrolled";
 
-for (const line of readFileSync(".env.local", "utf8").split(/\r?\n/)) {
-  const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-  if (!match || process.env[match[1]]) continue;
-  let value = match[2].trim();
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
-  process.env[match[1]] = value;
-}
+if (!["legacy", "optimized"].includes(mode)) throw new Error("--mode must be legacy or optimized");
+if (!["realtime", "direct"].includes(delivery)) throw new Error("--delivery must be realtime or direct");
+if (!playerCounts.length || playerCounts.some(count => !Number.isInteger(count) || count < 1 || count > 50)) throw new Error("--players must contain integers from 1 through 50");
+if (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > 50) throw new Error("--questions must be an integer from 1 through 50");
+if (!Number.isInteger(runCount) || runCount < 1 || runCount > 20) throw new Error("--runs must be an integer from 1 through 20");
+if (!Number.isInteger(realtimeConnectBatchSize) || realtimeConnectBatchSize < 1 || realtimeConnectBatchSize > 10) throw new Error("--realtime-connect-batch-size must be an integer from 1 through 10");
+if (!Number.isInteger(realtimeConnectStaggerMs) || realtimeConnectStaggerMs < 0 || realtimeConnectStaggerMs > 5_000) throw new Error("--realtime-connect-stagger-ms must be an integer from 0 through 5000");
+if (!Number.isInteger(realtimePresenceBatchSize) || realtimePresenceBatchSize < 1 || realtimePresenceBatchSize > 10) throw new Error("--realtime-presence-batch-size must be an integer from 1 through 10");
+if (!Number.isInteger(realtimePresenceStaggerMs) || realtimePresenceStaggerMs < 0 || realtimePresenceStaggerMs > 5_000) throw new Error("--realtime-presence-stagger-ms must be an integer from 0 through 5000");
+if (!["uncontrolled", "cold", "warm"].includes(transitionProfile)) throw new Error("--transition-profile must be uncontrolled, cold, or warm");
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-if (!supabaseUrl || !anonKey) throw new Error("Public Supabase configuration is required");
-
 const avatar = { base: "bean", skin: "#FFB38A", eyes: "happy", head: "sprout", accessory: "none", accent: "#3155E7" };
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const REALTIME_WAIT_TIMEOUT_MS = 20_000;
+const REALTIME_LATE_DIAGNOSTIC_MS = 5_000;
+const networkRequestCounts = new Map();
+const observedVercelRegions = new Set();
+
+function waitWithTimeout(promise, message) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(typeof message === "function" ? message() : message)), REALTIME_WAIT_TIMEOUT_MS);
+    promise.then(
+      value => { clearTimeout(timeout); resolve(value); },
+      error => { clearTimeout(timeout); reject(error); }
+    );
+  });
+}
+
+function parseServerTiming(value) {
+  const timings = {};
+  for (const part of value.split(",")) {
+    const match = part.trim().match(/^([A-Za-z0-9_-]+);dur=([0-9.]+)$/);
+    if (match) timings[match[1]] = Number(match[2]);
+  }
+  return timings;
+}
+
+function requestKey(path, options) {
+  const pathname = new URL(path, baseUrl).pathname
+    .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id")
+    .replace(/\/\d{6}(?=\/|$)/g, "/:code");
+  return `${options.method ?? "GET"} ${pathname}`;
+}
 
 async function request(path, options = {}, expectedStatus) {
+  const key = requestKey(path, options);
+  networkRequestCounts.set(key, (networkRequestCounts.get(key) ?? 0) + 1);
+  const clientSentWallMs = Date.now();
   const startedAt = performance.now();
   const response = await fetch(`${baseUrl}${path}`, options);
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) throw new Error(`${path} returned ${contentType || "no content type"}`);
   const body = await response.json();
+  const clientReceivedWallMs = Date.now();
+  const clientReceivedMonotonicMs = performance.now();
   const elapsedMs = performance.now() - startedAt;
+  const vercelId = response.headers.get("x-vercel-id");
+  if (vercelId) observedVercelRegions.add(vercelId.split("::")[0]);
   if (expectedStatus !== undefined ? response.status !== expectedStatus : !response.ok) {
     throw new Error(`${path} returned ${response.status}: ${body.error ?? "request failed"}`);
   }
-  return { body, elapsedMs };
+  const databaseCallsHeader = response.headers.get("x-quizloom-database-calls");
+  const databaseCalls = Number(databaseCallsHeader);
+  return {
+    body,
+    elapsedMs,
+    clientSentWallMs,
+    clientReceivedWallMs,
+    clientReceivedMonotonicMs,
+    serverTiming: parseServerTiming(response.headers.get("server-timing") ?? ""),
+    transitionDiagnostics: {
+      coalescer: response.headers.get("x-quizloom-transition-coalescer"),
+      databaseCalls: databaseCallsHeader !== null && Number.isInteger(databaseCalls) && databaseCalls >= 0 ? databaseCalls : null
+    }
+  };
+}
+
+async function verifyStagingApplication() {
+  const response = await request("/api/benchmark/identity", { headers: { Accept: "application/json" }, cache: "no-store" }, 200);
+  const identity = response.body;
+  if (identity.environment !== "staging" || identity.projectRef !== staging.stagingProjectRef || !identity.benchmarkWritesEnabled) {
+    throw new Error("The target application did not confirm the same write-enabled staging Supabase project");
+  }
+  return { vercelRegion: identity.vercelRegion ?? null, supabaseRegion: identity.supabaseRegion ?? staging.supabaseRegion };
+}
+
+function percentile(sorted, fraction) {
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
 }
 
 function summarize(values) {
   if (!values.length) return { samples: 0 };
-  const sorted = [...values].sort((a, b) => a - b);
-  return {
+  const sorted = [...values].sort((left, right) => left - right);
+  const result = {
     samples: values.length,
-    averageMs: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
-    p95Ms: Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)])
+    averageMs: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length * 10) / 10,
+    minimumMs: Math.round(sorted[0] * 10) / 10,
+    p05Ms: Math.round(percentile(sorted, 0.05) * 10) / 10,
+    p50Ms: Math.round(percentile(sorted, 0.5) * 10) / 10,
+    maximumMs: Math.round(sorted.at(-1) * 10) / 10
   };
+  if (values.length >= 20) result.p95Ms = Math.round(percentile(sorted, 0.95) * 10) / 10;
+  if (values.length >= 100) result.p99Ms = Math.round(percentile(sorted, 0.99) * 10) / 10;
+  return result;
 }
 
 function makeMetrics() {
-  return { actionHttp: [], realtimeAfterClick: [], realtimeAfterResponse: [], followupHydration: [], stateReadyAfterClick: [], scheduledStartHeadroom: [], authoritativeDuration: [] };
+  return {
+    actionHttp: [], serverTotal: [], networkAndClientOverhead: [], followupServerTotal: [], followupNetworkAndClientOverhead: [], realtimeAfterClick: [], realtimeAfterResponse: [],
+    databaseToSubscriberApprox: [], followupHydration: [], stateReadyAfterClick: [], scheduledStartHeadroom: [],
+    clockOffsetUncertainty: [], requestArrivalApprox: [], responseReturnApprox: [],
+    authoritativeDuration: [], serverStages: {},
+    headroomClassification: { confirmedReady: 0, confirmedLate: 0, uncertain: 0, unmeasured: 0 },
+    transitionDiagnostics: { coalescerHits: 0, coalescerMisses: 0, coalescerBypasses: 0, databaseCalls: 0 }
+  };
+}
+
+function recordFollowupHttp(sample, result) {
+  const serverTotal = result.serverTiming.total;
+  if (Number.isFinite(serverTotal)) {
+    sample.followupServerTotal.push(serverTotal);
+    sample.followupNetworkAndClientOverhead.push(Math.max(0, result.elapsedMs - serverTotal));
+  }
+  for (const [stage, duration] of Object.entries(result.serverTiming)) {
+    if (stage === "total") continue;
+    (sample.serverStages[`followup-${stage}`] ??= []).push(duration);
+  }
+  const coalescer = result.transitionDiagnostics.coalescer;
+  if (coalescer === "hit") sample.transitionDiagnostics.coalescerHits++;
+  else if (coalescer === "miss") sample.transitionDiagnostics.coalescerMisses++;
+  else if (coalescer === "disabled" || coalescer === "bypass") sample.transitionDiagnostics.coalescerBypasses++;
+  if (result.transitionDiagnostics.databaseCalls !== null) sample.transitionDiagnostics.databaseCalls += result.transitionDiagnostics.databaseCalls;
+}
+
+function recordHttp(sample, result) {
+  sample.actionHttp.push(result.elapsedMs);
+  const serverTotal = result.serverTiming.total;
+  if (Number.isFinite(serverTotal)) {
+    sample.serverTotal.push(serverTotal);
+    sample.networkAndClientOverhead.push(Math.max(0, result.elapsedMs - serverTotal));
+  }
+  for (const [stage, duration] of Object.entries(result.serverTiming)) {
+    if (stage === "total") continue;
+    (sample.serverStages[stage] ??= []).push(duration);
+  }
+}
+
+function recordDatabaseDelivery(sample, row, eventWallTime) {
+  const databaseUpdatedAt = new Date(row.updated_at ?? 0).getTime();
+  const duration = eventWallTime - databaseUpdatedAt;
+  if (Number.isFinite(duration) && duration >= 0 && duration < 60_000) sample.databaseToSubscriberApprox.push(duration);
 }
 
 function summarizeMetrics(metrics) {
-  return Object.fromEntries(Object.entries(metrics).map(([key, values]) => [key, summarize(values)]));
+  const result = {};
+  for (const [key, values] of Object.entries(metrics)) {
+    if (key === "serverStages") result.serverStages = Object.fromEntries(Object.entries(values).map(([stage, durations]) => [stage, summarize(durations)]));
+    else if (key === "headroomClassification" || key === "transitionDiagnostics") result[key] = { ...values };
+    else result[key] = summarize(values);
+  }
+  return result;
 }
 
-async function runPopulation(playerCount) {
+function mergeMetrics(target, source) {
+  for (const [operation, metrics] of Object.entries(source)) {
+    const destination = target[operation] ??= makeMetrics();
+    for (const [key, values] of Object.entries(metrics)) {
+      if (key === "serverStages") {
+        for (const [stage, durations] of Object.entries(values)) (destination.serverStages[stage] ??= []).push(...durations);
+      } else if (key === "headroomClassification" || key === "transitionDiagnostics") {
+        for (const [name, count] of Object.entries(values)) destination[key][name] += count;
+      } else destination[key].push(...values);
+    }
+  }
+}
+
+function recordScheduledStart(sample, result) {
+  const observation = observeScheduledStart(result);
+  if (!observation) { sample.headroomClassification.unmeasured++; return; }
+  sample.scheduledStartHeadroom.push(observation.headroomMs);
+  sample.clockOffsetUncertainty.push(observation.uncertaintyMs);
+  sample.requestArrivalApprox.push(observation.requestArrivalMs);
+  sample.responseReturnApprox.push(observation.responseReturnMs);
+  sample.headroomClassification[observation.classification]++;
+  if (observation.authoritativeDurationMs !== null) sample.authoritativeDuration.push(observation.authoritativeDurationMs);
+}
+
+async function cleanupBenchmarkData(quiz, room) {
+  if (!quiz) return;
+  const attempts = 3;
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (room) {
+      try {
+        await request("/api/host/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-host-token": room.hostToken },
+          body: JSON.stringify({ code: room.code, action: "end" })
+        });
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    try {
+      await request(`/api/quizzes/${quiz.quizId}`, {
+        method: "DELETE",
+        headers: { "x-quiz-token": quiz.quizToken }
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < attempts) await sleep(attempt * 250);
+  }
+
+  throw new Error(
+    `Benchmark cleanup could not delete disposable quiz ${quiz.quizId} after ${attempts} attempts; staging test data may remain.`,
+    { cause: lastError }
+  );
+}
+
+async function runPopulation(playerCount, runNumber) {
   const quizDocument = {
     version: 1,
-    title: `Performance ${playerCount} ${Date.now()}`,
-    description: "Disposable latency benchmark",
+    title: `Performance ${playerCount} run ${runNumber} ${Date.now()}`,
+    description: "Disposable staging latency benchmark",
     pointsPerCorrectAnswer: 1,
     questions: Array.from({ length: questionCount }, (_, index) => ({
       question: `Benchmark question ${index + 1}?`,
@@ -70,149 +259,432 @@ async function runPopulation(playerCount) {
   let quiz;
   let room;
   let activeTracker = null;
+  let realtimeStartup = null;
   const clients = [];
   const channels = [];
-  const metrics = { start: makeMetrics(), reveal: makeMetrics(), next: makeMetrics(), answerCounter: makeMetrics(), finish: makeMetrics() };
+  const connectionGroups = [];
+  const realtimeChannelHealth = new Map();
+  const realtimeMessages = { hostRoom: 0, hostAnswerCounters: 0, playerRoom: 0, hostPlayerRows: 0, playerPlayerRows: 0, presenceSyncs: 0 };
+  const presenceDiagnostics = { hostSyncs: 0, playerSyncs: 0, successfulTrackCalls: 0 };
+  const answerCounterDiagnostics = [];
+  const metrics = {
+    quizCreate: makeMetrics(), roomCreate: makeMetrics(), join: makeMetrics(), start: makeMetrics(),
+    answerSubmit: makeMetrics(), answerCounter: makeMetrics(), reveal: makeMetrics(), next: makeMetrics(),
+    finish: makeMetrics(), finalStandings: makeMetrics()
+  };
+  const channelHealthSummary = () => {
+    const entries = [...realtimeChannelHealth.values()];
+    const data = entries.filter(entry => entry.kind === "data");
+    const presence = entries.filter(entry => entry.kind === "presence");
+    const liveData = data.filter(entry => entry.lastStatus === "SUBSCRIBED").length;
+    const livePresence = presence.filter(entry => entry.lastStatus === "SUBSCRIBED").length;
+    const reconnects = entries.reduce((sum, entry) => sum + entry.reconnects, 0);
+    const failures = entries.reduce((sum, entry) => sum + entry.failures, 0);
+    const systemErrors = entries.reduce((sum, entry) => sum + entry.systemErrors, 0);
+    const unavailablePlayers = data
+      .filter(entry => entry.role === "player" && entry.lastStatus !== "SUBSCRIBED")
+      .map(entry => entry.playerNumber)
+      .filter(Number.isInteger);
+    const failureTypes = [...new Set(entries.map(entry => entry.lastFailureType).filter(Boolean))].sort();
+    const systemErrorTypes = [...new Set(entries.map(entry => entry.lastSystemErrorType).filter(Boolean))].sort();
+    const statuses = kind => Object.entries(entries.filter(entry => entry.kind === kind).reduce((counts, entry) => {
+      counts[entry.lastStatus] = (counts[entry.lastStatus] ?? 0) + 1;
+      return counts;
+    }, {})).sort(([left], [right]) => left.localeCompare(right)).map(([status, count]) => `${status}:${count}`).join(",");
+    return `data channels=${liveData}/${data.length} subscribed; presence channels=${livePresence}/${presence.length} subscribed; ` +
+      `data statuses=${statuses("data") || "none"}; presence statuses=${statuses("presence") || "none"}; ` +
+      `reconnects=${reconnects}; failures=${failures}; unavailable player subscriptions=${unavailablePlayers.length ? unavailablePlayers.join(",") : "none"}; ` +
+      `failure types=${failureTypes.length ? failureTypes.join(",") : "none"}; system errors=${systemErrors}; ` +
+      `system error types=${systemErrorTypes.length ? systemErrorTypes.join(",") : "none"}`;
+  };
+
   try {
-    quiz = (await request("/api/quizzes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(quizDocument) }, 201)).body;
-    room = (await request(`/api/quizzes/${quiz.quizId}`, { method: "POST", headers: { "x-quiz-token": quiz.quizToken } }, 201)).body;
-    const players = await Promise.all(Array.from({ length: playerCount }, async (_, index) => (await request("/api/players/join", {
+    const quizResult = await request("/api/quizzes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(quizDocument) }, 201);
+    recordHttp(metrics.quizCreate, quizResult);
+    quiz = quizResult.body;
+
+    const roomResult = await request(`/api/quizzes/${quiz.quizId}`, { method: "POST", headers: { "x-quiz-token": quiz.quizToken } }, 201);
+    recordHttp(metrics.roomCreate, roomResult);
+    room = roomResult.body;
+
+    const joinResults = await Promise.all(Array.from({ length: playerCount }, async (_, index) => request("/api/players/join", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: room.code, nickname: `Perf${playerCount}P${index + 1}`, avatar })
-    }, 201)).body));
+      body: JSON.stringify({ code: room.code, nickname: `R${runNumber}P${index + 1}`, avatar })
+    }, 201)));
+    joinResults.forEach(result => recordHttp(metrics.join, result));
+    const players = joinResults.map(result => result.body);
 
     if (delivery === "realtime") {
+      const registerChannel = (client, channel, details) => {
+        channels.push([client, channel, details.presence]);
+        const health = {
+          role: details.role,
+          kind: details.kind,
+          playerNumber: details.playerNumber,
+          lastStatus: "CREATED",
+          statusChanges: 0,
+          subscribedCount: 0,
+          reconnects: 0,
+          failures: 0,
+          lastFailureType: null,
+          systemEvents: 0,
+          systemErrors: 0,
+          lastSystemErrorType: null
+        };
+        realtimeChannelHealth.set(channel, health);
+        channel.on("system", {}, payload => {
+          health.systemEvents++;
+          const errorType = classifyRealtimeSystemError(payload);
+          if (!errorType) return;
+          health.systemErrors++;
+          health.lastSystemErrorType = errorType;
+        });
+      };
       const hostClient = createClient(supabaseUrl, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
       clients.push(hostClient);
-      const hostChannel = hostClient.channel(`perf-host-${room.roomId}`).on("postgres_changes", {
+      const hostChannel = hostClient.channel(`perf-host-${room.roomId}-${runNumber}`, {
+        // A channel can report SUBSCRIBED before its Postgres replication
+        // listener is ready. Holding the callback closes that timing gap.
+        config: { postgres_changes_options: { wait: true } }
+      }).on("postgres_changes", {
         event: "UPDATE", schema: "public", table: "game_rooms", filter: `id=eq.${room.roomId}`
-      }, payload => activeTracker?.onHostEvent(payload.new));
-      channels.push([hostClient, hostChannel]);
+      }, payload => { realtimeMessages.hostRoom++; activeTracker?.onHostEvent(payload.new); }).on("postgres_changes", {
+        event: "*", schema: "public", table: "room_answer_counters", filter: `room_id=eq.${room.roomId}`
+      }, payload => { realtimeMessages.hostAnswerCounters++; activeTracker?.onAnswerCounterEvent?.(payload.new); }).on("postgres_changes", {
+        event: "*", schema: "public", table: "room_player_presence", filter: `room_id=eq.${room.roomId}`
+      }, () => { realtimeMessages.hostPlayerRows++; });
+      registerChannel(hostClient, hostChannel, { role: "host", kind: "data" });
+      const hostPresence = hostClient.channel(`perf-presence-${room.roomId}-${runNumber}`, { config: { presence: { key: "host" } } })
+        .on("presence", { event: "sync" }, () => { realtimeMessages.presenceSyncs++; presenceDiagnostics.hostSyncs++; });
+      registerChannel(hostClient, hostPresence, { role: "host", kind: "presence", presence: { role: "host" } });
+      connectionGroups.push({
+        role: "host",
+        channels: [
+          { channel: hostChannel, presence: null },
+          { channel: hostPresence, presence: { role: "host" } }
+        ]
+      });
 
       for (let index = 0; index < playerCount; index++) {
         const client = createClient(supabaseUrl, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
         clients.push(client);
-        const channel = client.channel(`perf-player-${room.roomId}-${index}`).on("postgres_changes", {
-          event: "UPDATE", schema: "public", table: "game_rooms", filter: `id=eq.${room.roomId}`
-        }, payload => activeTracker?.onPlayerEvent(index, payload.new));
-        channels.push([client, channel]);
-      }
-      await Promise.all(channels.map(([, channel]) => new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Realtime subscription timed out")), 15000);
-        channel.subscribe(status => {
-          if (status === "SUBSCRIBED") { clearTimeout(timeout); resolve(); }
-          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") { clearTimeout(timeout); reject(new Error(`Realtime subscription failed: ${status}`)); }
+        const channel = client.channel(`perf-player-${room.roomId}-${runNumber}-${index}`, {
+          config: { postgres_changes_options: { wait: true } }
+        }).on("postgres_changes", {
+          // Players need phase transitions, not the host-only answer counter.
+          // These non-overlapping filters retain question, reveal, and finish
+          // updates without fanning each submitted answer to every player.
+          event: "UPDATE", schema: "public", table: "game_rooms",
+          filter: `id=eq.${room.roomId},status=eq.question,answer_count=eq.0`
+        }, payload => { realtimeMessages.playerRoom++; activeTracker?.onPlayerEvent(index, payload.new); }).on("postgres_changes", {
+          event: "UPDATE", schema: "public", table: "game_rooms",
+          filter: `id=eq.${room.roomId},status=in.(results,finished)`
+        }, payload => { realtimeMessages.playerRoom++; activeTracker?.onPlayerEvent(index, payload.new); }).on("postgres_changes", {
+          // Player clients need new lobby participants. The projection cannot
+          // expose score/ranking fields; reveal/final state stays authenticated.
+          event: "INSERT", schema: "public", table: "room_player_presence", filter: `room_id=eq.${room.roomId}`
+        }, () => { realtimeMessages.playerPlayerRows++; });
+        registerChannel(client, channel, { role: "player", kind: "data", playerNumber: index + 1 });
+        const presence = client.channel(`perf-presence-${room.roomId}-${runNumber}`, { config: { presence: { key: players[index].playerId } } })
+          .on("presence", { event: "sync" }, () => { realtimeMessages.presenceSyncs++; presenceDiagnostics.playerSyncs++; });
+        registerChannel(client, presence, { role: "player", kind: "presence", playerNumber: index + 1, presence: { role: "player", playerId: players[index].playerId } });
+        connectionGroups.push({
+          role: "player",
+          playerNumber: index + 1,
+          channels: [
+            { channel, presence: null },
+            { channel: presence, presence: { role: "player", playerId: players[index].playerId } }
+          ]
         });
-      })));
+      }
+      const startupStartedAt = performance.now();
+      await runInBatches(connectionGroups, async group => {
+        await Promise.all(group.channels.map(({ channel }) => waitForRealtimeSubscription(
+          channel,
+          realtimeChannelHealth.get(channel),
+          { timeoutMs: REALTIME_WAIT_TIMEOUT_MS, diagnostics: channelHealthSummary }
+        )));
+      }, {
+        batchSize: realtimeConnectBatchSize,
+        staggerMs: realtimeConnectStaggerMs
+      });
+      const subscriptionsReadyAt = performance.now();
+      const presenceChannels = connectionGroups.flatMap(group => group.channels.filter(entry => entry.presence));
+      await runInBatches(presenceChannels, async presenceChannel => {
+        const trackResult = await presenceChannel.channel.track(presenceChannel.presence);
+        if (trackResult !== "ok") {
+          throw new Error(`Realtime presence tracking failed: ${trackResult} (${channelHealthSummary()})`);
+        }
+        presenceDiagnostics.successfulTrackCalls++;
+      }, {
+        batchSize: realtimePresenceBatchSize,
+        staggerMs: realtimePresenceStaggerMs
+      });
+      const presenceReadyAt = performance.now();
+      realtimeStartup = {
+        durationMs: Number((presenceReadyAt - startupStartedAt).toFixed(1)),
+        subscriptionDurationMs: Number((subscriptionsReadyAt - startupStartedAt).toFixed(1)),
+        presenceTrackDurationMs: Number((presenceReadyAt - subscriptionsReadyAt).toFixed(1)),
+        clientCount: connectionGroups.length,
+        channelCount: channels.length,
+        batchSize: realtimeConnectBatchSize,
+        staggerMs: realtimeConnectStaggerMs,
+        presenceBatchSize: realtimePresenceBatchSize,
+        presenceStaggerMs: realtimePresenceStaggerMs,
+        transientFailures: [...realtimeChannelHealth.values()].reduce((sum, health) => sum + health.failures, 0)
+      };
     }
 
     const stateFor = player => request(`/api/rooms/${room.code}/state?playerId=${player.playerId}`, { headers: { "x-player-token": player.playerToken } });
     const revealFor = player => request(`/api/rooms/${room.code}/reveal?playerId=${player.playerId}`, { headers: { "x-player-token": player.playerToken } });
-    const hostAction = action => request("/api/host/action", { method: "POST", headers: { "Content-Type": "application/json", "x-host-token": room.hostToken }, body: JSON.stringify({ code: room.code, action }) });
+    const hostAction = (action, signal) => request("/api/host/action", { method: "POST", headers: { "Content-Type": "application/json", "x-host-token": room.hostToken }, body: JSON.stringify({ code: room.code, action }), signal });
     const hostState = () => request(`/api/rooms/${room.code}/state`, { headers: { "x-host-token": room.hostToken } });
 
     async function measureTransition(kind, action, predicate, followup) {
       const sample = metrics[kind];
       const clickAt = performance.now();
+      const messageBaseline = { ...realtimeMessages };
       if (delivery === "direct") {
         const actionResult = await hostAction(action);
-        sample.actionHttp.push(actionResult.elapsedMs);
+        recordHttp(sample, actionResult);
         await Promise.all(players.map(async player => {
           const hydrateStartedAt = performance.now();
           let hydrated;
           if (followup === "state" && (mode === "legacy" || kind === "finish")) hydrated = await stateFor(player);
-          else if (followup === "state") hydrated = await request(`/api/rooms/${room.code}/transition?question=${Number(actionResult.body.transition?.room?.currentQuestion)}`);
+          else if (followup === "state") hydrated = await request(`/api/rooms/${room.code}/transition?question=${Number(actionResult.body.transition?.room?.currentQuestion)}&playerId=${player.playerId}`, { headers: { "x-player-token": player.playerToken } });
           if (followup === "reveal") hydrated = await revealFor(player);
           const readyAt = performance.now();
           sample.followupHydration.push(readyAt - hydrateStartedAt);
           sample.stateReadyAfterClick.push(readyAt - clickAt);
+          if (hydrated) recordFollowupHttp(sample, hydrated);
           if ((kind === "start" || kind === "next") && hydrated?.body?.room?.questionStartedAt) {
-            sample.scheduledStartHeadroom.push(new Date(hydrated.body.room.questionStartedAt).getTime() - Date.now());
-            sample.authoritativeDuration.push(new Date(hydrated.body.room.questionEndsAt).getTime() - new Date(hydrated.body.room.questionStartedAt).getTime());
+            recordScheduledStart(sample, hydrated);
           }
         }));
         return actionResult.body;
       }
+
       let responseAt = null;
-      let resolveAll;
-      let rejectAll;
-      const complete = new Promise((resolve, reject) => { resolveAll = resolve; rejectAll = reject; });
+      let resolveEvents;
+      const eventsComplete = new Promise(resolve => { resolveEvents = resolve; });
       const seen = new Set();
-      let completed = 0;
-      const timeout = setTimeout(() => rejectAll(new Error(`${kind} events timed out`)), 20000);
+      const hydrationTasks = [];
+      let hydratedCount = 0;
+      let matchingBeforeResponse = 0;
+      let mismatchedEvents = 0;
+      let duplicateEvents = 0;
+      let deliveryTimedOut = false;
+      let maximumObservedLagMs = 0;
+      const observedRoomStates = new Map();
+      const observeRoomEvent = row => {
+        const status = typeof row?.status === "string" ? row.status : "missing-status";
+        const question = Number.isInteger(Number(row?.current_question)) ? Number(row.current_question) : "missing-question";
+        const answerCount = Number.isInteger(Number(row?.answer_count)) ? Number(row.answer_count) : "missing-count";
+        const key = `${status}/q${question}/answers${answerCount}`;
+        observedRoomStates.set(key, (observedRoomStates.get(key) ?? 0) + 1);
+        const updatedAt = new Date(row?.updated_at ?? 0).getTime();
+        const lag = Date.now() - updatedAt;
+        if (Number.isFinite(lag) && lag >= 0 && lag < 60_000) maximumObservedLagMs = Math.max(maximumObservedLagMs, lag);
+      };
+      const messageDeltaSummary = () => {
+        const delta = Object.fromEntries(Object.entries(realtimeMessages).map(([key, value]) => [key, value - messageBaseline[key]]));
+        return `transition deltas: host room=${delta.hostRoom}; player room=${delta.playerRoom}; ` +
+            `host answer counters=${delta.hostAnswerCounters}; host player rows=${delta.hostPlayerRows}; ` +
+            `player player rows=${delta.playerPlayerRows}; presence syncs=${delta.presenceSyncs}`;
+      };
+      const observedStateSummary = () => {
+        if (!observedRoomStates.size) return "observed room states=none";
+        return `observed room states=${[...observedRoomStates.entries()].map(([state, count]) => `${state}:${count}`).join(",")}; ` +
+          `maximum observed database-to-client lag=${Math.round(maximumObservedLagMs)}ms`;
+      };
       activeTracker = {
-        onHostEvent() {},
-        async onPlayerEvent(index, row) {
-          if (seen.has(index) || !predicate(row)) return;
+        onHostEvent(row) { observeRoomEvent(row); },
+        onPlayerEvent(index, row) {
+          observeRoomEvent(row);
+          if (seen.has(index)) { duplicateEvents++; return; }
+          if (!predicate(row)) { mismatchedEvents++; return; }
           seen.add(index);
+          if (responseAt === null) matchingBeforeResponse++;
+          if (seen.size === playerCount) resolveEvents();
+          if (deliveryTimedOut) return;
           const eventAt = performance.now();
           sample.realtimeAfterClick.push(eventAt - clickAt);
-          try {
+          recordDatabaseDelivery(sample, row, Date.now());
+          if (responseAt !== null) sample.realtimeAfterResponse.push(Math.max(0, eventAt - responseAt));
+          const hydration = (async () => {
             const hydrateStartedAt = performance.now();
-            let hydrated;
-            if (followup === "state" && (mode === "legacy" || kind === "finish")) hydrated = await stateFor(players[index]);
-            else if (followup === "state") hydrated = await request(`/api/rooms/${room.code}/transition?question=${Number(row.current_question)}`);
-            if (followup === "reveal") await revealFor(players[index]);
-            await Promise.resolve();
+            let hydratedResponse;
+            if (followup === "state" && (mode === "legacy" || kind === "finish")) hydratedResponse = await stateFor(players[index]);
+            else if (followup === "state") hydratedResponse = await request(`/api/rooms/${room.code}/transition?question=${Number(row.current_question)}&playerId=${players[index].playerId}`, { headers: { "x-player-token": players[index].playerToken } });
+            if (followup === "reveal") hydratedResponse = await revealFor(players[index]);
             const readyAt = performance.now();
             sample.followupHydration.push(readyAt - hydrateStartedAt);
             sample.stateReadyAfterClick.push(readyAt - clickAt);
-            if ((kind === "start" || kind === "next") && hydrated?.body?.room?.questionStartedAt) {
-              sample.scheduledStartHeadroom.push(new Date(hydrated.body.room.questionStartedAt).getTime() - Date.now());
-              sample.authoritativeDuration.push(new Date(hydrated.body.room.questionEndsAt).getTime() - new Date(hydrated.body.room.questionStartedAt).getTime());
+            if (hydratedResponse) recordFollowupHttp(sample, hydratedResponse);
+            if ((kind === "start" || kind === "next") && hydratedResponse?.body?.room?.questionStartedAt) {
+              recordScheduledStart(sample, hydratedResponse);
             }
-            if (responseAt !== null) sample.realtimeAfterResponse.push(Math.max(0, eventAt - responseAt));
-            completed++;
-            if (completed === playerCount) { clearTimeout(timeout); resolveAll(); }
-          } catch (error) { clearTimeout(timeout); rejectAll(error); }
+            hydratedCount++;
+          })();
+          // Attach a rejection handler immediately. Promise.all below still
+          // propagates the original rejection after every event has arrived.
+          void hydration.catch(() => {});
+          hydrationTasks.push(hydration);
         }
       };
-      const actionResult = await hostAction(action);
+      const actionController = new AbortController();
+      const actionTimeout = setTimeout(() => actionController.abort(), REALTIME_WAIT_TIMEOUT_MS);
+      let actionResult;
+      try {
+        actionResult = await hostAction(action, actionController.signal);
+      } catch (error) {
+        if (actionController.signal.aborted) {
+          throw new Error(`${kind} action response timed out before Realtime delivery could be evaluated`, { cause: error });
+        }
+        throw error;
+      } finally {
+        clearTimeout(actionTimeout);
+      }
       responseAt = performance.now();
-      sample.actionHttp.push(actionResult.elapsedMs);
-      await complete;
-      activeTracker = null;
-      return actionResult.body;
+      recordHttp(sample, actionResult);
+      const authoritativeStatus = actionResult.body.transition?.room?.status ?? actionResult.body.status ?? "unknown";
+      const authoritativeQuestion = actionResult.body.transition?.room?.currentQuestion ?? "unknown";
+      try {
+        if (seen.size < playerCount) {
+          try {
+            await waitWithTimeout(eventsComplete, `${kind} Realtime delivery timed out after the action response`);
+          } catch {
+            deliveryTimedOut = true;
+            const matchingAtTimeout = seen.size;
+            await Promise.race([eventsComplete, sleep(REALTIME_LATE_DIAGNOSTIC_MS)]);
+            const lateMatchingEvents = seen.size - matchingAtTimeout;
+            const recovery = await Promise.allSettled(players.map(stateFor));
+            const recoveredPlayers = recovery.filter(result => result.status === "fulfilled" &&
+              result.value.body.room.status === authoritativeStatus &&
+              Number(result.value.body.room.currentQuestion) === Number(authoritativeQuestion)).length;
+            const failedRecoveries = recovery.filter(result => result.status === "rejected").length;
+            throw new Error(
+              `${kind} Realtime delivery timed out after the action response ` +
+              `(received ${matchingAtTimeout}/${playerCount} matching player room events within ${REALTIME_WAIT_TIMEOUT_MS}ms; ` +
+              `late matching events in ${REALTIME_LATE_DIAGNOSTIC_MS}ms diagnostic window=${lateMatchingEvents}; ` +
+              `matching before response=${matchingBeforeResponse}; mismatched=${mismatchedEvents}; duplicates=${duplicateEvents}; ` +
+              `${messageDeltaSummary()}; ${observedStateSummary()}; ` +
+              `authoritative status=${authoritativeStatus}; question=${authoritativeQuestion}; ` +
+              `authoritative recovery=${recoveredPlayers}/${playerCount}; recovery request failures=${failedRecoveries}; ` +
+              `${channelHealthSummary()})`
+            );
+          }
+        }
+        await waitWithTimeout(Promise.all(hydrationTasks), () =>
+          `${kind} hydration timed out after all Realtime events arrived ` +
+          `(hydrated ${hydratedCount}/${playerCount}; authoritative status=${authoritativeStatus}; question=${authoritativeQuestion})`
+        );
+        return actionResult.body;
+      } finally {
+        activeTracker = null;
+      }
     }
 
-    async function measureAnswerCounter(questionNumber, optionId) {
-      const sample = metrics.answerCounter;
+    async function measureAnswers(questionNumber, optionId) {
+      const counterSample = metrics.answerCounter;
       const clickAt = performance.now();
+      let waitForFinalCounter = Promise.resolve();
+      let highestAnswerCount = 0;
+      const diagnostic = {
+        questionNumber,
+        expectedCount: playerCount,
+        rawMatchingEvents: 0,
+        invalidEvents: 0,
+        staleOrDuplicateEvents: 0,
+        advancingEvents: 0,
+        jumpEvents: 0,
+        skippedIntermediateCounts: 0,
+        highestObservedCount: 0,
+        authoritativeFinalCount: null
+      };
+
+      if (delivery === "realtime") {
+        let resolveEvent;
+        waitForFinalCounter = new Promise(resolve => { resolveEvent = resolve; });
+        const bucketCounts = new Map();
+        activeTracker = {
+          onPlayerEvent() {},
+          onHostEvent() {},
+          onAnswerCounterEvent(row) {
+            if (Number(row.question_index) !== questionNumber) return;
+            diagnostic.rawMatchingEvents++;
+            const bucket = Number(row.bucket); const count = Number(row.answer_count);
+            if (!Number.isInteger(bucket) || !Number.isInteger(count) || count < 1) { diagnostic.invalidEvents++; return; }
+            const previousBucketCount = bucketCounts.get(bucket) ?? 0;
+            if (count <= previousBucketCount) { diagnostic.staleOrDuplicateEvents++; return; }
+            bucketCounts.set(bucket, count);
+            const total = [...bucketCounts.values()].reduce((sum, value) => sum + value, 0);
+            if (total <= highestAnswerCount) { diagnostic.staleOrDuplicateEvents++; return; }
+            const advance = total - highestAnswerCount;
+            if (advance > 1) {
+              diagnostic.jumpEvents++;
+              diagnostic.skippedIntermediateCounts += advance - 1;
+            }
+            highestAnswerCount = total;
+            diagnostic.highestObservedCount = total;
+            diagnostic.advancingEvents++;
+            const eventAt = performance.now();
+            counterSample.realtimeAfterClick.push(eventAt - clickAt);
+            counterSample.stateReadyAfterClick.push(eventAt - clickAt);
+            recordDatabaseDelivery(counterSample, row, Date.now());
+            if (total === playerCount) resolveEvent();
+          }
+        };
+      }
+
+      const submissions = await Promise.all(players.map(player => request("/api/answers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-player-token": player.playerToken },
+        body: JSON.stringify({ code: room.code, playerId: player.playerId, optionId })
+      })));
+      submissions.forEach(result => recordHttp(metrics.answerSubmit, result));
+
       if (delivery === "direct") {
-        const result = await request("/api/answers", { method: "POST", headers: { "Content-Type": "application/json", "x-player-token": players[0].playerToken }, body: JSON.stringify({ code: room.code, playerId: players[0].playerId, optionId }) });
-        sample.actionHttp.push(result.elapsedMs);
         const hydrateStartedAt = performance.now();
         const state = await hostState();
-        if (Number(state.body.room.answerCount) !== 1) throw new Error("Authoritative answer count did not update");
+        if (Number(state.body.room.answerCount) !== playerCount) throw new Error("Authoritative answer count did not reach the full population");
         const readyAt = performance.now();
-        sample.followupHydration.push(readyAt - hydrateStartedAt);
-        sample.stateReadyAfterClick.push(readyAt - clickAt);
-        return;
-      }
-      let resolveEvent;
-      let rejectEvent;
-      const event = new Promise((resolve, reject) => { resolveEvent = resolve; rejectEvent = reject; });
-      const timeout = setTimeout(() => rejectEvent(new Error("answer counter event timed out")), 20000);
-      activeTracker = {
-        onPlayerEvent() {},
-        onHostEvent(row) {
-          if (Number(row.current_question) !== questionNumber || Number(row.answer_count) !== 1) return;
-          const eventAt = performance.now();
-          sample.realtimeAfterClick.push(eventAt - clickAt);
-          sample.stateReadyAfterClick.push(eventAt - clickAt);
-          clearTimeout(timeout);
-          resolveEvent();
+        counterSample.followupHydration.push(readyAt - hydrateStartedAt);
+        counterSample.stateReadyAfterClick.push(readyAt - clickAt);
+      } else {
+        let deliveryError = null;
+        try {
+          await waitWithTimeout(waitForFinalCounter, () =>
+            `answer counter Realtime delivery timed out ` +
+            `(observed ${highestAnswerCount}/${playerCount}; host counter events=${realtimeMessages.hostAnswerCounters}; ` +
+            `host room events=${realtimeMessages.hostRoom}; player room events=${realtimeMessages.playerRoom})`
+          );
+        } catch (error) {
+          deliveryError = error;
+        } finally {
+          activeTracker = null;
         }
-      };
-      const result = await request("/api/answers", { method: "POST", headers: { "Content-Type": "application/json", "x-player-token": players[0].playerToken }, body: JSON.stringify({ code: room.code, playerId: players[0].playerId, optionId }) });
-      const responseAt = performance.now();
-      sample.actionHttp.push(result.elapsedMs);
-      await event;
-      const eventAt = clickAt + sample.realtimeAfterClick.at(-1);
-      sample.realtimeAfterResponse.push(Math.max(0, eventAt - responseAt));
-      sample.followupHydration.push(0);
-      activeTracker = null;
+        const authoritative = await hostState();
+        diagnostic.authoritativeFinalCount = Number(authoritative.body.room.answerCount);
+        answerCounterDiagnostics.push(diagnostic);
+        if (diagnostic.authoritativeFinalCount !== playerCount) {
+          throw new Error(
+            `Authoritative answer count did not reach the full population ` +
+            `(question=${questionNumber}; authoritative=${diagnostic.authoritativeFinalCount}/${playerCount}; ` +
+            `observed=${diagnostic.highestObservedCount}/${playerCount})`
+          );
+        }
+        if (deliveryError) {
+          throw new Error(
+            `${deliveryError.message}; authoritative=${diagnostic.authoritativeFinalCount}/${playerCount}; ` +
+            `raw matching events=${diagnostic.rawMatchingEvents}; advancing events=${diagnostic.advancingEvents}; ` +
+            `jump events=${diagnostic.jumpEvents}; skipped intermediate counts=${diagnostic.skippedIntermediateCounts}; ` +
+            `stale or duplicate events=${diagnostic.staleOrDuplicateEvents}`,
+            { cause: deliveryError }
+          );
+        }
+      }
     }
 
     for (let question = 0; question < questionCount; question++) {
@@ -220,27 +692,101 @@ async function runPopulation(playerCount) {
       await measureTransition(kind, kind, row => row.status === "question" && Number(row.current_question) === question, "state");
       const currentState = (await stateFor(players[0])).body;
       await sleep(Math.max(0, new Date(currentState.room.questionStartedAt).getTime() - Date.now()) + 100);
-      await measureAnswerCounter(question, currentState.question.options[0].id);
+      await measureAnswers(question, currentState.question.options[0].id);
       await measureTransition("reveal", "reveal", row => row.status === "results" && Number(row.current_question) === question, "reveal");
     }
+
     await measureTransition("finish", "next", row => row.status === "finished" && Number(row.current_question) === questionCount - 1, "state");
+    const finalStateResults = await Promise.all([hostState(), ...players.map(stateFor)]);
+    finalStateResults.forEach(result => recordHttp(metrics.finalStandings, result));
+    if (finalStateResults.some(result => result.body.room.status !== "finished")) throw new Error("Final standings were not authoritative for every client");
     await hostAction("end");
-    return Object.fromEntries(Object.entries(metrics).map(([key, values]) => [key, summarizeMetrics(values)]));
+    return { metrics, realtimeMessages, realtimeStartup, presenceDiagnostics, answerCounterDiagnostics };
   } finally {
     activeTracker = null;
     await Promise.allSettled(channels.map(([client, channel]) => client.removeChannel(channel)));
     await Promise.allSettled(clients.map(client => client.removeAllChannels()));
     for (const client of clients) client.realtime.disconnect();
-    if (room) {
-      try { await request("/api/host/action", { method: "POST", headers: { "Content-Type": "application/json", "x-host-token": room.hostToken }, body: JSON.stringify({ code: room.code, action: "end" }) }); } catch {}
-    }
-    if (quiz) {
-      try { await request(`/api/quizzes/${quiz.quizId}`, { method: "DELETE", headers: { "x-quiz-token": quiz.quizToken } }); } catch {}
-    }
+    await cleanupBenchmarkData(quiz, room);
     await sleep(100);
   }
 }
 
+const targetIdentity = await verifyStagingApplication();
+let transitionWarmup = null;
+if (transitionProfile === "warm") {
+  const warmed = await request("/api/rooms/000000/transition?question=0", { cache: "no-store" }, 403);
+  transitionWarmup = {
+    elapsedMs: Number(warmed.elapsedMs.toFixed(1)),
+    serverTotalMs: Number.isFinite(warmed.serverTiming.total) ? warmed.serverTiming.total : null,
+    databaseCalls: warmed.transitionDiagnostics.databaseCalls
+  };
+}
 const results = {};
-for (const count of playerCounts) results[count] = await runPopulation(count);
-console.log(JSON.stringify({ mode, delivery, playerCounts, questionCount, environment: delivery === "realtime" ? "local Next.js dev server with separate Supabase Realtime clients; not physical-device data" : "local Next.js dev server with parallel direct transition/reveal hydration requests; excludes Realtime delivery and physical-device network delay", results }, null, 2));
+for (const playerCount of playerCounts) {
+  const aggregate = {};
+  const realtimeStartup = [];
+  const messages = { hostRoom: 0, hostAnswerCounters: 0, playerRoom: 0, hostPlayerRows: 0, playerPlayerRows: 0, presenceSyncs: 0 };
+  const presenceDiagnostics = { hostSyncs: 0, playerSyncs: 0, successfulTrackCalls: 0 };
+  const answerCounterDiagnostics = [];
+  const transitionRuns = [];
+  for (let run = 1; run <= runCount; run++) {
+    console.error(`Benchmarking ${playerCount} players, run ${run}/${runCount}...`);
+    const result = await runPopulation(playerCount, run);
+    mergeMetrics(aggregate, result.metrics);
+    if (result.realtimeStartup) realtimeStartup.push(result.realtimeStartup);
+    for (const [kind, count] of Object.entries(result.realtimeMessages)) messages[kind] += count;
+    for (const [kind, count] of Object.entries(result.presenceDiagnostics)) presenceDiagnostics[kind] += count;
+    answerCounterDiagnostics.push(...result.answerCounterDiagnostics);
+    const isFirstMeasuredTransition = playerCount === playerCounts[0] && run === 1;
+    transitionRuns.push({
+      run,
+      profile: transitionProfile === "uncontrolled"
+        ? "uncontrolled"
+        : transitionProfile === "warm"
+          ? "warm"
+          : isFirstMeasuredTransition
+            ? "cold-candidate"
+            : "warm-after-first-use",
+      firstQuestion: summarizeMetrics(result.metrics.start),
+      subsequentQuestions: summarizeMetrics(result.metrics.next)
+    });
+  }
+  results[playerCount] = {
+    metrics: Object.fromEntries(Object.entries(aggregate).map(([operation, metrics]) => [operation, summarizeMetrics(metrics)])),
+    realtimeStartup,
+    realtimeMessages: { ...messages, total: Object.values(messages).reduce((sum, count) => sum + count, 0) },
+    presenceDiagnostics,
+    answerCounterDiagnostics,
+    transitionRuns
+  };
+}
+
+console.log(JSON.stringify({
+  mode,
+  delivery,
+  playerCounts,
+  questionCount,
+  runCount,
+  transitionProfile,
+  transitionWarmup,
+  realtimeConnectionPolicy: delivery === "realtime" ? {
+    batchSize: realtimeConnectBatchSize,
+    staggerMs: realtimeConnectStaggerMs,
+    presenceBatchSize: realtimePresenceBatchSize,
+    presenceStaggerMs: realtimePresenceStaggerMs,
+    rationale: "Bound channel joins and pace Presence fan-out separately; gameplay latency timing starts after both readiness phases."
+  } : null,
+  percentilePolicy: "minimum, p05, p50, and maximum for all non-empty samples; p95 at 20+ samples; p99 at 100+ samples",
+  headroomPolicy: "Scheduled-start headroom uses the transition response's four-timestamp server-clock estimate. Confirmed late means headroom plus uncertainty is below zero; confirmed ready means headroom minus uncertainty is non-negative; remaining observations are uncertain.",
+  environment: {
+    kind: "isolated-staging",
+    targetOrigin: new URL(baseUrl).origin,
+    vercelRegion: targetIdentity.vercelRegion,
+    observedVercelRegions: [...observedVercelRegions].sort(),
+    supabaseRegion: targetIdentity.supabaseRegion,
+    dataPolicy: "Disposable quizzes, rooms, and players are ended and deleted after each run. This is simulated-client data, not physical-device data."
+  },
+  networkRequestCounts: Object.fromEntries([...networkRequestCounts.entries()].sort(([left], [right]) => left.localeCompare(right))),
+  results
+}, null, 2));

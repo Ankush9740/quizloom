@@ -3,6 +3,7 @@ import { getAdminClient } from "@/lib/supabase/server";
 import { createSessionToken, hashToken } from "@/lib/server/session";
 import { apiError } from "@/lib/server/http";
 import { portableQuizSchema } from "@/lib/validation";
+import { insertQuestions } from "@/lib/server/quiz-write";
 
 export const runtime = "nodejs";
 
@@ -20,15 +21,5 @@ export async function POST(request: Request) {
   } catch (error) {
     if (quizId) await db.from("quizzes").delete().eq("id", quizId);
     return apiError(error);
-  }
-}
-
-export async function insertQuestions(db: ReturnType<typeof getAdminClient>, quizId: string, questions: ReturnType<typeof portableQuizSchema.parse>["questions"]) {
-  for (let position = 0; position < questions.length; position++) {
-    const item = questions[position];
-    const { data: question, error } = await db.from("questions").insert({ quiz_id: quizId, prompt: item.question, position, time_limit_seconds: item.timeLimit }).select("id").single();
-    if (error) throw error;
-    const { error: optionsError } = await db.from("question_options").insert(item.options.map((text, optionPosition) => ({ question_id: question.id, text, position: optionPosition, is_correct: optionPosition === item.correctAnswer })));
-    if (optionsError) throw optionsError;
   }
 }

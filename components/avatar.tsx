@@ -27,7 +27,7 @@ function CustomAvatar({ config, size, className }: { config: AvatarConfig; size:
 
 function ThemedAvatar({ config, size, className }: { config: AvatarConfig; size: number; className: string }) {
   const character = config.character as Exclude<AvatarCharacter, "custom">;
-  const square = character === "robot" || character === "knight";
+  const square = character === "robot" || character === "knight" || character === "android";
   return <svg className={`shrink-0 rounded-[30%] ${className}`} width={size} height={size} viewBox="0 0 100 100" role="img" aria-label={`${character.replace("-", " ")} avatar`}>
     <rect width="100" height="100" rx="28" fill={config.accent}/>
     <CharacterBack character={character}/>
@@ -67,12 +67,21 @@ function CharacterBack({ character }: { character: Exclude<AvatarCharacter, "cus
     case "monster": return <><path d="m20 28 2-23 18 20m40 3L78 5 60 25" fill="#F6C453" stroke="#14213D" strokeWidth="4"/><path d="M12 61 3 52m85 9 9-9" stroke="#14213D" strokeWidth="6" strokeLinecap="round"/></>;
     case "dragon": return <><path d="m21 30-2-25 20 21m40 4 2-25-20 21" fill="#F6C453" stroke="#14213D" strokeWidth="4"/><path d="M18 53 2 36l4 31m76-14 16-17-4 31" fill="#62B86B" stroke="#14213D" strokeWidth="4"/></>;
     case "superhero": return <><path d="M16 78 3 97h94L84 78" fill="#3155E7" stroke="#14213D" strokeWidth="4"/><path d="M18 27 27 8l13 17" fill="#14213D"/></>;
+    case "raccoon": return <><path d="M18 34 21 7l23 20m38 7L79 7 56 27" fill="#9AA7B8" stroke="#14213D" strokeWidth="4"/><path d="M11 76 2 64l17-3m70 15 9-12-17-3" fill="#64748B" stroke="#14213D" strokeWidth="4"/></>;
+    case "otter": return <><circle cx="22" cy="28" r="14" fill="#8B5E3C" stroke="#14213D" strokeWidth="4"/><circle cx="78" cy="28" r="14" fill="#8B5E3C" stroke="#14213D" strokeWidth="4"/><path d="M18 75 4 85m78-10 14 10" stroke="#8B5E3C" strokeWidth="8" strokeLinecap="round"/></>;
+    case "axolotl": return <><path d="M20 31 6 17m14 20L3 35m18 8L7 53m73-22 14-14M80 37l17-2m-18 8 14 10" stroke="#F78DA7" strokeWidth="8" strokeLinecap="round"/><circle cx="8" cy="17" r="5" fill="#F6C453"/><circle cx="92" cy="17" r="5" fill="#F6C453"/></>;
+    case "bee": return <><path d="M21 39C1 17 3 59 26 58m53-19c20-22 18 20-5 19" fill="#DDE8FF" stroke="#14213D" strokeWidth="4"/><path d="M37 21 29 7m34 14 8-14" stroke="#14213D" strokeWidth="4"/><circle cx="28" cy="6" r="5" fill="#14213D"/><circle cx="72" cy="6" r="5" fill="#14213D"/></>;
+    case "phoenix": return <><path d="M22 34 10 8l28 18L50 2l12 24L90 8 78 38" fill="#F6C453" stroke="#14213D" strokeWidth="4" strokeLinejoin="round"/><path d="M18 65 2 50l8 31m72-16 16-15-8 31" fill="#FF6846" stroke="#14213D" strokeWidth="4"/></>;
+    case "unicorn": return <><path d="m40 25 10-24 10 24" fill="#F6C453" stroke="#14213D" strokeWidth="4"/><path d="M20 35 15 9l26 18" fill="#F4DCE8" stroke="#14213D" strokeWidth="4"/><path d="M80 35 85 9 59 27" fill="#F4DCE8" stroke="#14213D" strokeWidth="4"/><path d="M24 25q26-22 52 0" fill="none" stroke="#7C4DFF" strokeWidth="7"/></>;
+    case "griffin": return <><path d="M18 35 8 8l32 20m42 7L92 8 60 28" fill="#D9A65F" stroke="#14213D" strokeWidth="4"/><path d="M18 58 2 43l5 30m75-15 16-15-5 30" fill="#F6C453" stroke="#14213D" strokeWidth="4"/></>;
+    case "android": return <><path d="M50 18V7m0 0-8-5m8 5 8-5" stroke="#14213D" strokeWidth="4"/><circle cx="42" cy="3" r="4" fill="#20B486"/><circle cx="58" cy="3" r="4" fill="#3155E7"/><path d="M15 44H7v23h11m67-23h8v23H82" fill="#8ED1C5" stroke="#14213D" strokeWidth="4"/></>;
   }
 }
 
 function CharacterFace({ character, skin }: { character: Exclude<AvatarCharacter, "custom">; skin: string }) {
   if (character === "ninja") return <><path d="M20 43q30-18 60 0v23q-30 12-60 0Z" fill={skin} stroke="#14213D" strokeWidth="4"/><path d="M20 64h60v24H20Z" fill="#14213D"/><EyePair/><path d="m73 70 15 15m-5-18 9 9" stroke="#FF6846" strokeWidth="4"/></>;
   if (character === "robot") return <><rect x="28" y="38" width="16" height="13" rx="4" fill="#3155E7"/><rect x="56" y="38" width="16" height="13" rx="4" fill="#3155E7"/><path d="M34 68h32v10H34Z" fill="#FFFDF7" stroke="#14213D" strokeWidth="3"/><path d="M42 68v10m16-10v10" stroke="#14213D" strokeWidth="2"/></>;
+  if (character === "android") return <><circle cx="35" cy="45" r="8" fill="#3155E7"/><circle cx="65" cy="45" r="8" fill="#20B486"/><path d="M32 69q18 14 36 0" fill="none" stroke="#14213D" strokeWidth="4"/><circle cx="50" cy="73" r="4" fill="#FF6846"/></>;
   if (character === "knight") return <><path d="M19 36h62v25H19Z" fill="#70809A" stroke="#14213D" strokeWidth="4"/><path d="M26 48h48" stroke="#14213D" strokeWidth="5" strokeDasharray="8 5"/><path d="M42 69h16v14H42Z" fill="#FF6846"/></>;
   if (character === "alien") return <><ellipse cx="36" cy="46" rx="9" ry="14" fill="#14213D" transform="rotate(-18 36 46)"/><ellipse cx="64" cy="46" rx="9" ry="14" fill="#14213D" transform="rotate(18 64 46)"/><path d="M42 70q8 7 16 0" fill="none" stroke="#14213D" strokeWidth="4" strokeLinecap="round"/></>;
   if (character === "monster") return <><circle cx="50" cy="47" r="14" fill="#FFFDF7" stroke="#14213D" strokeWidth="4"/><circle cx="50" cy="47" r="5" fill="#14213D"/><path d="M34 71q16 15 32 0Z" fill="#FFFDF7" stroke="#14213D" strokeWidth="4"/><path d="m41 73 4 7 4-8m6 1 4 7 3-8" fill="#FFFDF7"/></>;
@@ -82,7 +91,7 @@ function CharacterFace({ character, skin }: { character: Exclude<AvatarCharacter
     {character === "pirate" && <><path d="M50 37h29v25H50Z" fill="#14213D"/><path d="M64 58 82 76" stroke="#14213D" strokeWidth="4"/></>}
     {(character === "explorer" || character === "astronaut") && <path d="M20 31h60v40H20Z" fill="#9EB4FF" fillOpacity=".22" stroke="#FFFDF7" strokeWidth="4"/>}
     {character === "wizard" && <path d="M39 63q11 8 22 0l10 24-21-8-21 8Z" fill="#FFFDF7" stroke="#14213D" strokeWidth="3"/>}
-    {character === "frog" ? <><circle cx="32" cy="35" r="5" fill="#14213D"/><circle cx="68" cy="35" r="5" fill="#14213D"/></> : character !== "owl" && character !== "penguin" ? <EyePair/> : null}
+    {character === "frog" ? <><circle cx="32" cy="35" r="5" fill="#14213D"/><circle cx="68" cy="35" r="5" fill="#14213D"/></> : !["owl", "penguin", "raccoon", "otter", "axolotl", "bee", "phoenix", "unicorn", "griffin"].includes(character) ? <EyePair/> : null}
     {character === "geek" && <><rect x="23" y="35" width="23" height="19" rx="7" fill="none" stroke="#14213D" strokeWidth="4"/><rect x="54" y="35" width="23" height="19" rx="7" fill="none" stroke="#14213D" strokeWidth="4"/><path d="M46 43h8" stroke="#14213D" strokeWidth="4"/></>}
     {(character === "cat" || character === "fox" || character === "tiger") && <><path d="m47 57 3 3 3-3" fill="#F78DA7" stroke="#14213D" strokeWidth="2"/><path d="M30 62h13m-14 7h14m27-7H57m14 7H57" stroke="#14213D" strokeWidth="2"/></>}
     {(character === "dog" || character === "bear" || character === "panda") && <><ellipse cx="50" cy="65" rx="17" ry="13" fill="#FFFDF7" fillOpacity=".55"/><ellipse cx="50" cy="59" rx="6" ry="5" fill="#14213D"/></>}
@@ -101,6 +110,13 @@ function CharacterFace({ character, skin }: { character: Exclude<AvatarCharacter
     {character === "pirate" && <path d="M36 68q8 7 16 0" fill="none" stroke="#14213D" strokeWidth="4"/>}
     {character === "frog" && <><circle cx="43" cy="58" r="2" fill="#14213D"/><circle cx="57" cy="58" r="2" fill="#14213D"/><path d="M34 68q16 10 32 0" fill="none" stroke="#14213D" strokeWidth="4"/></>}
     {character === "superhero" && <path d="m50 64 5 9 10 1-7 7 2 7-10-5-10 5 2-7-7-7 10-1Z" fill="#F6C453" stroke="#14213D" strokeWidth="2"/>}
+    {character === "raccoon" && <><path d="m24 39 19-7 7 12 7-12 19 7-10 22-16-8-16 8Z" fill="#475569"/><EyePair/><ellipse cx="50" cy="62" rx="7" ry="5" fill="#14213D"/><path d="M41 71q9 7 18 0" fill="none" stroke="#14213D" strokeWidth="3"/></>}
+    {character === "otter" && <><ellipse cx="50" cy="62" rx="20" ry="15" fill="#E7C6A6"/><EyePair/><ellipse cx="50" cy="58" rx="6" ry="5" fill="#14213D"/><path d="M29 65H14m15 7H12m59-7h15m-15 7h17" stroke="#14213D" strokeWidth="2"/></>}
+    {character === "axolotl" && <><EyePair/><path d="M34 67q16 14 32 0" fill="none" stroke="#14213D" strokeWidth="4" strokeLinecap="round"/><circle cx="27" cy="59" r="5" fill="#F4DCE8"/><circle cx="73" cy="59" r="5" fill="#F4DCE8"/></>}
+    {character === "bee" && <><EyePair/><path d="M21 58h58M23 72h54" stroke="#14213D" strokeWidth="7"/><path d="M42 84h16" stroke="#14213D" strokeWidth="4"/></>}
+    {character === "phoenix" && <><EyePair/><path d="m50 57 8 7-8 6-8-6Z" fill="#F6C453" stroke="#14213D" strokeWidth="2"/><path d="M31 76q19 10 38 0" fill="none" stroke="#14213D" strokeWidth="3"/></>}
+    {character === "unicorn" && <><EyePair/><path d="M43 68q7 7 14 0" fill="none" stroke="#14213D" strokeWidth="3"/><circle cx="29" cy="61" r="5" fill="#F78DA7" fillOpacity=".45"/><circle cx="71" cy="61" r="5" fill="#F78DA7" fillOpacity=".45"/></>}
+    {character === "griffin" && <><EyePair/><path d="m43 57 7 7 7-7-7-5Z" fill="#F6C453" stroke="#14213D" strokeWidth="2"/><path d="M40 71q10 8 20 0" fill="none" stroke="#14213D" strokeWidth="3"/></>}
   </>;
 }
 

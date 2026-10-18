@@ -72,6 +72,7 @@ const next = applyQuestionTransition(results, secondQuestion, 1, player.id);
 assert.equal(next.me?.answered, false);
 assert.equal(next.me?.selectedOptionId, undefined);
 assert.equal(next.me?.wasCorrect, undefined);
+assert.equal(applyAcceptedAnswer(next, player.id, "option-a", "question-a"), next, "A delayed answer response must not mark the next question as answered");
 
 const correct = applyPlayerReveal(applyAcceptedAnswer(next, player.id, "option-a"), player.id, {
   ...incorrectReveal,

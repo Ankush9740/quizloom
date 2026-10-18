@@ -1,5 +1,12 @@
 type ApiErrorBody = { error?: unknown };
 
+export class ApiResponseError<T extends ApiErrorBody = ApiErrorBody> extends Error {
+  constructor(message: string, readonly status: number, readonly body: T) {
+    super(message);
+    this.name = "ApiResponseError";
+  }
+}
+
 export async function readJsonResponse<T>(response: Response): Promise<T> {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!contentType.includes("application/json")) {
@@ -16,9 +23,10 @@ export async function readJsonResponse<T>(response: Response): Promise<T> {
   }
 
   if (!response.ok) {
-    throw new Error(typeof body.error === "string" && body.error.trim()
+    const message = typeof body.error === "string" && body.error.trim()
       ? body.error
-      : `The request failed with status ${response.status}.`);
+      : `The request failed with status ${response.status}.`;
+    throw new ApiResponseError(message, response.status, body);
   }
   return body;
 }

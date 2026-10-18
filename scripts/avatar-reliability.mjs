@@ -36,6 +36,7 @@ function loadSource(file) {
 }
 
 const { defaultAvatar, avatarPresets } = loadSource(path.join(root, "lib/avatar-defaults.ts"));
+const { avatarBackgroundPalette, chooseAvatarBackground } = loadSource(path.join(root, "lib/avatar-backgrounds.ts"));
 const { normalizeAvatarConfig, normalizePlayerView } = loadSource(path.join(root, "lib/runtime-normalization.ts"));
 const { Avatar } = loadSource(path.join(root, "components/avatar.tsx"));
 const { Leaderboard, Podium } = loadSource(path.join(root, "components/leaderboard.tsx"));
@@ -49,13 +50,20 @@ for (const value of malformedAvatars) {
 }
 
 assert.deepEqual(normalizeAvatarConfig(legacyAvatar), { ...legacyAvatar, character: "custom" }, "legacy six-field avatars must remain compatible");
-assert.equal(avatarPresets.length, 31);
-assert.equal(new Set(avatarPresets.map(preset => preset.config.character)).size, 31, "presets must be visually themed, not duplicate IDs");
+assert.equal(avatarPresets.length, 39);
+assert.equal(new Set(avatarPresets.map(preset => preset.config.character)).size, 39, "presets must be visually themed, not duplicate IDs");
 for (const preset of avatarPresets) {
   assert.doesNotThrow(() => renderToStaticMarkup(React.createElement(Avatar, { config: preset.config, size: 46 })));
   const recoloredBackdrop = { ...preset.config, accent: "#FF6846" };
   assert.equal(normalizeAvatarConfig(recoloredBackdrop).character, preset.config.character, "backdrop changes must preserve the selected character");
 }
+
+const duplicateBackdrops = [];
+for (let index = 0; index < avatarBackgroundPalette.length + 2; index += 1) {
+  duplicateBackdrops.push(chooseAvatarBackground("#3155E7", duplicateBackdrops));
+}
+assert.equal(new Set(duplicateBackdrops.slice(0, avatarBackgroundPalette.length)).size, avatarBackgroundPalette.length, "duplicate characters should exhaust unique curated backdrops before reuse");
+assert.equal(duplicateBackdrops[avatarBackgroundPalette.length], avatarBackgroundPalette[0], "palette exhaustion should wrap deterministically");
 
 let player = normalizePlayerView({ id: "player-1", nickname: "Rapid", avatar_config: legacyAvatar, score: 0, correct_answers: 0, streak: 0 });
 for (let score = 1; score <= 500; score += 1) {
@@ -72,4 +80,4 @@ const players = [
 assert.doesNotThrow(() => renderToStaticMarkup(React.createElement(Leaderboard, { players })));
 assert.doesNotThrow(() => renderToStaticMarkup(React.createElement(Podium, { players })));
 
-console.log("Avatar reliability passed: undefined, null, malformed, legacy, 31 presets with background-only recoloring, 500 rapid partial updates, leaderboard, and podium renders.");
+console.log("Avatar reliability passed: undefined, null, malformed, legacy, 39 original presets, deterministic duplicate-character backdrops, 500 rapid partial updates, leaderboard, and podium renders.");

@@ -1,53 +1,59 @@
 import { NextResponse } from "next/server";
 import { getAdminClient } from "@/lib/supabase/server";
 import { apiError } from "@/lib/server/http";
+import { hashToken } from "@/lib/server/session";
 import { roomCodeSchema } from "@/lib/validation";
+import { startServerTrace } from "@/lib/server/performance";
 
 export const dynamic = "force-dynamic";
 
 type TransitionResult =
   | { kind: "ok"; room: { status: "question"; currentQuestion: number; questionStartedAt: string | null; questionEndsAt: string | null; answerCount: number }; question: { id: string; number: number; prompt: string; timeLimit: number; options: { id: string; text: string; position: number }[] } }
-  | { kind: "missing" }
+  | { kind: "unauthorized" }
   | { kind: "moved"; status: string }
   | { kind: "question-missing" };
 
-// A transition fans out to every player at once. Coalesce only overlapping reads
-// on this server instance; resolved values are never retained, so stale states
-// cannot be replayed after the room advances.
-const inFlightTransitions = new Map<string, Promise<TransitionResult>>();
-
-function loadTransition(code: string, expectedQuestion: number) {
-  const key = `${code}:${expectedQuestion}`;
-  const existing = inFlightTransitions.get(key);
-  if (existing) return existing;
-  const pending = (async (): Promise<TransitionResult> => {
-    const db = getAdminClient();
-    const { data, error } = await db.rpc("get_quiz_room_transition", { p_room_code: code, p_question_index: expectedQuestion });
-    if (error) throw error;
-    return data as TransitionResult;
-  })();
-  inFlightTransitions.set(key, pending);
-  const clear = () => { if (inFlightTransitions.get(key) === pending) inFlightTransitions.delete(key); };
-  void pending.then(clear, clear);
-  return pending;
+function transitionResponse(body: unknown, status = 200) {
+  const response = NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
+  // The merged RPC performs exactly one database call per authenticated
+  // hydration. Process-local coalescing is intentionally not part of
+  // correctness because requests can land on different Vercel instances.
+  response.headers.set("X-Quizloom-Transition-Coalescer", "disabled");
+  response.headers.set("X-Quizloom-Database-Calls", "1");
+  return response;
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ code: string }> }) {
+  const trace = startServerTrace(request, "question.hydrate");
   const serverReceivedAt = new Date().toISOString();
   try {
     const code = roomCodeSchema.parse((await params).code);
     const expectedQuestion = Number(new URL(request.url).searchParams.get("question"));
     if (!Number.isInteger(expectedQuestion) || expectedQuestion < 0) {
-      return NextResponse.json({ error: "Question number is not valid" }, { status: 400 });
+      return trace.response(NextResponse.json({ error: "Question number is not valid" }, { status: 400 }));
     }
-    const transition = await loadTransition(code, expectedQuestion);
-    if (transition.kind === "missing") return NextResponse.json({ error: "Room not found" }, { status: 404 });
-    if (transition.kind === "moved") return NextResponse.json({ error: "The room has already moved to another state", status: transition.status }, { status: 409 });
-    if (transition.kind === "question-missing") return NextResponse.json({ error: "Current question not found" }, { status: 404 });
-    return NextResponse.json({
+    const playerIdValue = new URL(request.url).searchParams.get("playerId");
+    const playerId = playerIdValue && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(playerIdValue) ? playerIdValue : null;
+    const hostToken = request.headers.get("x-host-token");
+    const playerToken = request.headers.get("x-player-token");
+    const db = getAdminClient();
+    const { data, error } = await db.rpc("get_authorized_quiz_room_transition", {
+      p_room_code: code,
+      p_question_index: expectedQuestion,
+      p_host_token_hash: hostToken ? hashToken(hostToken) : null,
+      p_player_id: playerId,
+      p_player_token_hash: playerToken ? hashToken(playerToken) : null
+    });
+    if (error) throw error;
+    trace.mark("authorized-transition-rpc");
+    const transition = data as TransitionResult;
+    if (transition.kind === "unauthorized") return trace.response(transitionResponse({ error: "Room access is no longer valid" }, 403));
+    if (transition.kind === "moved") return trace.response(transitionResponse({ error: "The room has already moved to another state", status: transition.status }, 409));
+    if (transition.kind === "question-missing") return trace.response(transitionResponse({ error: "Current question not found" }, 404));
+    return trace.response(transitionResponse({
       room: transition.room,
       question: transition.question,
       clock: { receivedAt: serverReceivedAt, sentAt: new Date().toISOString() }
-    }, { headers: { "Cache-Control": "no-store" } });
-  } catch (error) { return apiError(error); }
+    }));
+  } catch (error) { return trace.response(apiError(error)); }
 }

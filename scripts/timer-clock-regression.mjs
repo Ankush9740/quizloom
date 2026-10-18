@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { deadlineRemainingMs, estimateServerClock } from "../lib/server-clock.ts";
+import { deadlineRemainingMs, estimateServerClock, getQuestionTiming } from "../lib/server-clock.ts";
 
 // The client wall clock is 18 seconds fast. The request also experiences
 // asymmetric latency and a full second of server-side processing time.
@@ -19,4 +19,17 @@ assert.ok(Math.abs(initialRemaining - 58_700) <= 100, `Clock skew was not correc
 const afterTwentySeconds = deadlineRemainingMs(deadline, clock, 25_000, 1_129_300);
 assert.equal(afterTwentySeconds, initialRemaining - 20_000);
 
-console.log(`Timer clock regression passed: 18s wall-clock skew corrected within ${Math.abs(initialRemaining - 58_700)}ms under delayed/asymmetric delivery.`);
+const scheduledStart = new Date(2_003_000).toISOString();
+const scheduledEnd = new Date(2_023_000).toISOString();
+const countdown = getQuestionTiming(scheduledStart, scheduledEnd, null, 0, 2_000_250);
+assert.equal(countdown.phase, "countdown", "Question content must remain hidden before the authoritative start");
+assert.equal(countdown.seconds, 3, "Countdown must be derived from the scheduled timestamp");
+const opening = getQuestionTiming(scheduledStart, scheduledEnd, null, 0, 2_003_000);
+assert.equal(opening.phase, "answering", "Question content must appear at the authoritative start boundary");
+assert.equal(opening.milliseconds, 20_000, "A configured 20-second question must open with the full 20-second window");
+assert.equal(getQuestionTiming(scheduledStart, scheduledEnd, null, 0, 2_022_999).phase, "answering");
+assert.equal(getQuestionTiming(scheduledStart, scheduledEnd, null, 0, 2_023_000).phase, "expired", "Question must close at the authoritative deadline");
+const reconnected = getQuestionTiming(scheduledStart, scheduledEnd, null, 0, 2_011_000);
+assert.equal(reconnected.milliseconds, 12_000, "Refresh/reconnect must reconstruct timing from server timestamps");
+
+console.log(`Timer clock regression passed: skew correction, hidden countdown boundary, exact 20-second window, deadline closure, and reconnect reconstruction.`);

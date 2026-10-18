@@ -34,3 +34,26 @@ export function timeUntilStartMs(startedAt: string | null, clock: ServerClock | 
   if (!Number.isFinite(startedAtMs)) return 0;
   return Math.max(0, startedAtMs - currentServerTime(clock, monotonicNowMs, wallNowMs));
 }
+
+export type QuestionTiming = {
+  phase: "countdown" | "answering" | "expired";
+  milliseconds: number;
+  seconds: number;
+  progressPercent: number;
+};
+
+/** Derives all question UI timing from authoritative server timestamps. */
+export function getQuestionTiming(startedAt: string | null, endsAt: string | null, clock: ServerClock | null, monotonicNowMs: number, wallNowMs: number): QuestionTiming {
+  const untilStart = timeUntilStartMs(startedAt, clock, monotonicNowMs, wallNowMs);
+  const remaining = deadlineRemainingMs(endsAt, clock, monotonicNowMs, wallNowMs);
+  const startedAtMs = new Date(startedAt ?? 0).getTime();
+  const endsAtMs = new Date(endsAt ?? 0).getTime();
+  const duration = Number.isFinite(startedAtMs) && Number.isFinite(endsAtMs) ? Math.max(1, endsAtMs - startedAtMs) : 1;
+  if (untilStart > 0) return { phase: "countdown", milliseconds: untilStart, seconds: Math.ceil(untilStart / 1_000), progressPercent: 100 };
+  return {
+    phase: remaining > 0 ? "answering" : "expired",
+    milliseconds: remaining,
+    seconds: Math.ceil(remaining / 1_000),
+    progressPercent: Math.max(0, Math.min(100, remaining / duration * 100))
+  };
+}

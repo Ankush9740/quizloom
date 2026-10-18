@@ -29,13 +29,14 @@ export function applyQuestionTransition(
   const player = currentPlayer(previous, playerId);
   return {
     ...previous,
-    room: { ...previous.room, ...transition.room },
+    room: { ...previous.room, ...transition.room, answerBuckets: [], legacyAnswerCount: 0 },
     question: transition.question,
     ...(player ? { me: { ...player, answered: false, lastPoints: 0, selectedOptionId: undefined, wasCorrect: undefined } } : {})
   };
 }
 
-export function applyAcceptedAnswer(previous: RoomState, playerId: string, optionId: string): RoomState {
+export function applyAcceptedAnswer(previous: RoomState, playerId: string, optionId: string, expectedQuestionId?: string): RoomState {
+  if (expectedQuestionId && previous.question?.id !== expectedQuestionId) return previous;
   const player = currentPlayer(previous, playerId);
   if (!player) return previous;
   return {

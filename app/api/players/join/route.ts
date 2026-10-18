@@ -1,36 +1,41 @@
 import { NextResponse } from "next/server";
 import { getAdminClient } from "@/lib/supabase/server";
-import { createSessionToken, hashToken, safeEqualHash } from "@/lib/server/session";
+import { createSessionToken, hashToken } from "@/lib/server/session";
 import { apiError } from "@/lib/server/http";
 import { avatarSchema, nicknameSchema, roomCodeSchema } from "@/lib/validation";
 import { z } from "zod";
 import { normalizeAvatarConfig } from "@/lib/runtime-normalization";
+import { startServerTrace } from "@/lib/server/performance";
 
 const joinSchema = z.object({ code: roomCodeSchema, nickname: nicknameSchema, avatar: avatarSchema, playerId: z.string().uuid().optional() });
 
 export async function POST(request: Request) {
+  const trace = startServerTrace(request, "player.join");
   try {
     const body = joinSchema.parse(await request.json()); const db = getAdminClient();
-    const { data: room, error: roomError } = await db.from("game_rooms").select("id,status,expires_at").eq("code", body.code).order("created_at", { ascending: false }).limit(1).maybeSingle();
-    if (roomError && roomError.code !== "PGRST116") throw roomError;
-    if (!room) return NextResponse.json({ error: "Invalid room code." }, { status: 404 });
-    if (room.status === "finished") return NextResponse.json({ error: "This room has ended." }, { status: 410 });
-    if (!Number.isFinite(new Date(room.expires_at).getTime()) || new Date(room.expires_at).getTime() <= Date.now()) return NextResponse.json({ error: "This room has expired." }, { status: 410 });
-    if (room.status !== "lobby") return NextResponse.json({ error: "That quiz has already started." }, { status: 409 });
     const reconnectToken = request.headers.get("x-player-token");
-    if (body.playerId && reconnectToken) {
-      const [{ data: existing }, { data: secret }] = await Promise.all([
-        db.from("players").select("id,nickname").eq("id", body.playerId).eq("room_id", room.id).maybeSingle(),
-        db.from("player_secrets").select("player_token_hash").eq("player_id", body.playerId).maybeSingle()
-      ]);
-      if (existing && secret && safeEqualHash(reconnectToken, secret.player_token_hash)) return NextResponse.json({ playerId: existing.id, nickname: existing.nickname, playerToken: reconnectToken, reconnected: true });
-    }
     const playerToken = createSessionToken();
-    const { data: player, error } = await db.from("players").insert({ room_id: room.id, nickname: body.nickname.trim().replace(/\s+/g, " "), avatar_config: normalizeAvatarConfig(body.avatar) }).select("id,nickname").single();
-    if (error?.code === "23505") return NextResponse.json({ error: "That nickname is already taken in this room" }, { status: 409 });
+    const { data, error } = await db.rpc("join_quiz_room", {
+      p_room_code: body.code,
+      p_nickname: body.nickname.trim().replace(/\s+/g, " "),
+      p_avatar: normalizeAvatarConfig(body.avatar),
+      p_existing_player_id: body.playerId ?? null,
+      p_reconnect_token_hash: reconnectToken ? hashToken(reconnectToken) : null,
+      p_new_player_token_hash: hashToken(playerToken)
+    });
+    trace.mark("join-rpc");
     if (error) throw error;
-    const { error: secretError } = await db.from("player_secrets").insert({ player_id: player.id, player_token_hash: hashToken(playerToken) });
-    if (secretError) { await db.from("players").delete().eq("id", player.id); throw secretError; }
-    return NextResponse.json({ playerId: player.id, nickname: player.nickname, playerToken }, { status: 201 });
-  } catch (error) { return apiError(error); }
+    const result = data as { kind?: string; playerId?: string; nickname?: string } | null;
+    if (result?.kind === "missing") return trace.response(NextResponse.json({ error: "Invalid room code." }, { status: 404 }));
+    if (result?.kind === "ended") return trace.response(NextResponse.json({ error: "This room has ended." }, { status: 410 }));
+    if (result?.kind === "expired") return trace.response(NextResponse.json({ error: "This room has expired." }, { status: 410 }));
+    if (result?.kind === "started") return trace.response(NextResponse.json({ error: "That quiz has already started." }, { status: 409 }));
+    if (result?.kind === "nickname-taken") return trace.response(NextResponse.json({ error: "That nickname is already taken in this room" }, { status: 409 }));
+    if (!result?.playerId || !result.nickname) throw new Error("The player session was not created");
+    if (result.kind === "reconnected" && reconnectToken) {
+      return trace.response(NextResponse.json({ playerId: result.playerId, nickname: result.nickname, playerToken: reconnectToken, reconnected: true }));
+    }
+    if (result.kind !== "created") throw new Error("The player session was not created");
+    return trace.response(NextResponse.json({ playerId: result.playerId, nickname: result.nickname, playerToken }, { status: 201 }));
+  } catch (error) { return trace.response(apiError(error)); }
 }
